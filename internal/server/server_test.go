@@ -1148,11 +1148,12 @@ func TestPublicLinks(t *testing.T) {
 	b1 := e.upload(bob, "bob.jpg", testJPEG(t, 64, 48, 84, false), 201)
 	e.json("POST", fmt.Sprintf("/api/v1/albums/%d/add", al.ID), bob, map[string]any{"ids": []int64{b1.ID}, "end": true}, 200, nil)
 
-	page := func(path string) (int, string) {
-		res := e.do("GET", path, "", nil, nil)
+	pageIn := func(lang, path string) (int, string) {
+		res := e.do("GET", path, "", nil, map[string]string{"Accept-Language": lang})
 		b, _ := io.ReadAll(res.Body)
 		return res.StatusCode, string(b)
 	}
+	page := func(path string) (int, string) { return pageIn("de-DE,de;q=0.9,en;q=0.5", path) }
 	var link Link
 	e.json("POST", "/api/v1/links", alice, map[string]any{"album_id": al.ID}, 201, &link)
 	if link.Title != "Ausflug" || !link.StripLocation || link.Path != "/s/"+link.Token || len(link.Token) < 20 {
@@ -1162,6 +1163,14 @@ func TestPublicLinks(t *testing.T) {
 	if code != 200 || !strings.Contains(body, "Ausflug") || !strings.Contains(body, "Am Tor") || !strings.Contains(body, "Berlin") ||
 		!strings.Contains(body, "Original laden") {
 		t.Fatalf("page: %d %.300s", code, body)
+	}
+	// In the visitor's language: English unless the browser prefers German.
+	if _, en := pageIn("en-US,en;q=0.9", link.Path); !strings.Contains(en, `lang="en"`) || !strings.Contains(en, "Download original") ||
+		!strings.Contains(en, "2 photos") || !strings.Contains(en, "shared by") || strings.Contains(en, "Original laden") {
+		t.Errorf("English page: %.400s", en)
+	}
+	if !strings.Contains(body, `lang="de"`) || !strings.Contains(body, "2 Fotos") {
+		t.Errorf("German page: %.400s", body)
 	}
 	if strings.Contains(body, "52.52") || strings.Contains(body, "13.41") {
 		t.Error("page shows coordinates")

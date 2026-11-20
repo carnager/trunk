@@ -7,7 +7,6 @@ import (
 	"embed"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"html/template"
 	"mime"
 	"net/http"
@@ -91,7 +90,7 @@ func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if title == "" {
-			title = "Fotos"
+			title = shareLanguage(r).DefaultTitle
 		}
 	}
 	if len(title) > 200 {
@@ -312,39 +311,9 @@ var shareHTML string
 //go:embed web/fonts/*.woff2
 var shareFonts embed.FS
 
-var germanMonths = []string{"Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"}
-
 func localDate(a *Asset) (time.Time, bool) {
 	t, err := time.Parse("2006-01-02T15:04:05", a.LocalTime)
 	return t, err == nil && a.LocalTime != ""
-}
-
-// dateRange says when the photos were taken, as briefly as it can:
-// "17. Juli 2023", "17.–20. Juli 2023", "Juli – September 2023", "2019 – 2023".
-func dateRange(list []*Asset) string {
-	var lo, hi time.Time
-	for _, a := range list {
-		if t, ok := localDate(a); ok {
-			if lo.IsZero() || t.Before(lo) {
-				lo = t
-			}
-			if t.After(hi) {
-				hi = t
-			}
-		}
-	}
-	m := func(t time.Time) string { return germanMonths[t.Month()-1] }
-	switch {
-	case lo.IsZero():
-		return ""
-	case lo.Year() != hi.Year():
-		return fmt.Sprintf("%d – %d", lo.Year(), hi.Year())
-	case lo.Month() != hi.Month():
-		return fmt.Sprintf("%s – %s %d", m(lo), m(hi), hi.Year())
-	case lo.Day() != hi.Day():
-		return fmt.Sprintf("%d.–%d. %s %d", lo.Day(), hi.Day(), m(hi), hi.Year())
-	}
-	return fmt.Sprintf("%d. %s %d", lo.Day(), m(lo), lo.Year())
 }
 
 // towns are the places the photos were taken, most photos first, at most three.
@@ -367,13 +336,6 @@ func towns(list []*Asset) string {
 }
 
 var shareTmpl = template.Must(template.New("share").Funcs(template.FuncMap{
-	"date": func(a *Asset) string {
-		t, ok := localDate(a)
-		if !ok {
-			return ""
-		}
-		return fmt.Sprintf("%d. %s %d", t.Day(), germanMonths[t.Month()-1], t.Year())
-	},
 	// Width over height, for rows of photos at their own proportions.
 	"ratio": func(a *Asset) string {
 		if a.Width <= 0 || a.Height <= 0 {
@@ -400,15 +362,17 @@ func (s *Server) handleSharePage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Robots-Tag", "noindex")
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self'; media-src 'self'")
+	lang := shareLanguage(r)
+	w.Header().Set("Vary", "Accept-Language")
 	l, err := s.openLink(r.Context(), r.PathValue("token"))
 	if err != nil {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusNotFound)
-		shareTmpl.Execute(w, map[string]any{"Gone": true})
+		shareTmpl.Execute(w, map[string]any{"Gone": true, "L": lang})
 		return
 	}
-	// The page is German, so are its place names.
-	ctx := context.WithValue(r.Context(), langKey{}, []language.Tag{language.German})
+	// Place names in the page's language.
+	ctx := context.WithValue(r.Context(), langKey{}, []language.Tag{lang.Tag})
 	list, err := s.linkAssets(ctx, l)
 	if err != nil {
 		s.internal(w, err)
@@ -424,28 +388,18 @@ func (s *Server) handleSharePage(w http.ResponseWriter, r *http.Request) {
 			videos++
 		}
 	}
-	count := fmt.Sprintf("%d Fotos", len(list)-videos)
-	switch {
-	case len(list)-videos == 1:
-		count = "1 Foto"
-	case len(list) == videos:
-		count = ""
-	}
-	if videos > 0 {
-		v := fmt.Sprintf("%d Videos", videos)
-		if videos == 1 {
-			v = "1 Video"
-		}
-		count = strings.TrimPrefix(count+" und "+v, " und ")
+	count := ""
+	if len(list) > 0 {
+		count = lang.count(len(list)-videos, videos)
 	}
 	meta := []string{}
-	for _, p := range []string{count, dateRange(list), towns(list)} {
+	for _, p := range []string{count, lang.dateRange(list), towns(list)} {
 		if p != "" {
 			meta = append(meta, p)
 		}
 	}
 	shareTmpl.Execute(w, map[string]any{
-		"Title": l.title, "Owner": owner, "Assets": list, "Token": l.token,
+		"Title": l.title, "Owner": owner, "Assets": list, "Token": l.token, "L": lang,
 		"Meta": strings.Join(meta, " · "),
 	})
 }
