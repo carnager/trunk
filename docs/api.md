@@ -158,6 +158,22 @@ location key blanked, in place, so size, pixels, date and camera stay as they ar
 keep working. Formats trunk cannot clean (HEIC, for one) are replaced by their preview JPEG when they
 have a location. Trashed photos leave the link; revoked and expired links show nothing.
 
+## Look-alikes
+
+| Call | |
+|---|---|
+| `GET /similar` | → `{"groups": [{"asset_ids": [..], "keep": id, "kind": "same"\|"burst"}], "pending": n}` |
+| `POST /similar/ignore` | `{"ids": [..]}` → `204`: these are no look-alikes of each other |
+
+Finds the user's own photos that look alike, to clean up a library: `same` is one picture in
+several files (a WhatsApp copy, an export, an edit saved as a copy), `burst` are shots taken
+moments apart. Byte-identical files never get this far; uploads are deduplicated. Each photo is
+fingerprinted from its thumbnail (a 512-bit difference hash plus how much detail it has) after
+upload, and in the background for older ones; `pending` counts those not done yet. Every photo in
+a group looks like every other one. `keep` is a suggestion: most pixels, then edited, favourite,
+captioned, larger file. Nothing is deleted by the server; clients trash what the user picks.
+Trashed photos are left out. `features.similar` says the server has this.
+
 ## Delta sync
 
 ```

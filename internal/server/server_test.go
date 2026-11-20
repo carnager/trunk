@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1380,4 +1381,132 @@ func TestMaintenance(t *testing.T) {
 	if p, _ := srv3.Verify(ctx, VerifyOptions{}); len(p) != 1 || p[0].Path != "carol/x.jpg" {
 		t.Errorf("verify through a symlink: %+v", p)
 	}
+}
+
+// scene draws a picture with structure: soft blobs on a gradient, shifted by
+// dx (a hand moving between burst shots) and in a palette from seed.
+func scene(w, h, dx int, seed uint8, quality int) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			fx, fy := float64(x+dx)/float64(w), float64(y)/float64(h)
+			sd := float64(seed)
+			v := 0.5 + 0.2*math.Sin(fx*19+sd)*math.Cos(fy*14+sd*0.7) + 0.15*math.Sin((fx+fy)*27+sd*1.3) +
+				0.15*math.Cos(fx*fy*40+sd*0.3)
+			img.Set(x, y, color.RGBA{uint8(v * 255), uint8((1 - v) * 200), seed, 255})
+		}
+	}
+	var buf bytes.Buffer
+	jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality})
+	return buf.Bytes()
+}
+
+func dark(w, h int, seed uint8) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, color.RGBA{seed % 3, seed % 2, 1, 255})
+		}
+	}
+	var buf bytes.Buffer
+	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80})
+	return buf.Bytes()
+}
+
+func TestSimilar(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	alice := e.login("alice", "phone")
+	bob := e.login("bob", "phone")
+
+	orig := e.upload(alice, "IMG_20240601_120000.jpg", scene(800, 600, 0, 10, 92), 201)
+	copy := e.upload(alice, "IMG-20240603-WA0001.jpg", scene(400, 300, 0, 10, 60), 201) // a WhatsApp copy, days later
+	other := e.upload(alice, "IMG_20240601_120500.jpg", scene(800, 600, 0, 200, 92), 201)
+	b1 := e.upload(alice, "IMG_20240710_090000.jpg", scene(800, 600, 0, 77, 90), 201)
+	b2 := e.upload(alice, "IMG_20240710_090002.jpg", scene(800, 600, 8, 77, 90), 201) // moved a little
+	d1 := e.upload(alice, "IMG_20230101_100000.jpg", dark(800, 600, 1), 201)
+	d2 := e.upload(alice, "IMG_20240101_100000.jpg", dark(800, 600, 2), 201)
+	theirs := e.upload(bob, "IMG_20240601_120000.jpg", scene(400, 300, 0, 10, 70), 201) // bob's copy: not alice's business
+	_ = theirs
+
+	type result struct {
+		Groups  []SimilarGroup
+		Pending int
+	}
+	var res result
+	// The thumbnail workers fingerprint new uploads; the backfill catches the rest.
+	e.srv.fillFingerprints(ctx)
+	e.json("GET", "/api/v1/similar", alice, nil, 200, &res)
+	if res.Pending != 0 {
+		t.Fatalf("pending: %d", res.Pending)
+	}
+	ids := func(g SimilarGroup) string {
+		s := append([]int64{}, g.AssetIDs...)
+		slices.Sort(s)
+		return fmt.Sprint(s)
+	}
+	got := map[string]SimilarGroup{}
+	for _, g := range res.Groups {
+		got[ids(g)] = g
+	}
+	want := func(kind string, keep Asset, as ...Asset) {
+		t.Helper()
+		var s []int64
+		for _, a := range as {
+			s = append(s, a.ID)
+		}
+		slices.Sort(s)
+		g, ok := got[fmt.Sprint(s)]
+		if !ok {
+			t.Errorf("no group %v; got %+v", s, res.Groups)
+			return
+		}
+		if g.Kind != kind || g.Keep != keep.ID {
+			t.Errorf("group %v: kind %s keep %d, want %s keep %d", s, g.Kind, g.Keep, kind, keep.ID)
+		}
+	}
+	want("same", orig, orig, copy)            // the larger one
+	want("burst", best2(b1, b2, got), b1, b2) // equal shots: either
+	if len(res.Groups) != 2 {
+		t.Errorf("groups: %+v (other %d, dark %d %d)", res.Groups, other.ID, d1.ID, d2.ID)
+	}
+	if res.Groups[0].AssetIDs[0] != b2.ID && res.Groups[0].AssetIDs[0] != b1.ID {
+		t.Errorf("not newest first: %+v", res.Groups)
+	}
+
+	// Favourites and edits weigh after pixels: of two equal shots, the favourite stays.
+	fav := b1
+	if got[ids(SimilarGroup{AssetIDs: []int64{b1.ID, b2.ID}})].Keep == b1.ID {
+		fav = b2
+	}
+	e.json("PATCH", fmt.Sprintf("/api/v1/assets/%d", fav.ID), alice, map[string]any{"favorite": true}, 200, nil)
+	e.json("GET", "/api/v1/similar", alice, nil, 200, &res)
+	for _, g := range res.Groups {
+		if g.Kind == "burst" && g.Keep != fav.ID {
+			t.Errorf("favourite not kept: %+v", g)
+		}
+	}
+
+	// "Not duplicates" makes a group go away; trashing one of two does too.
+	e.json("POST", "/api/v1/similar/ignore", alice, map[string][]int64{"ids": {b1.ID, b2.ID}}, 204, nil)
+	e.json("POST", "/api/v1/assets/trash", alice, map[string][]int64{"ids": {copy.ID}}, 204, nil)
+	e.json("GET", "/api/v1/similar", alice, nil, 200, &res)
+	if len(res.Groups) != 0 {
+		t.Errorf("after ignore and trash: %+v", res.Groups)
+	}
+	var bobs result
+	e.json("GET", "/api/v1/similar", bob, nil, 200, &bobs)
+	if len(bobs.Groups) != 0 {
+		t.Errorf("bob sees groups: %+v", bobs.Groups)
+	}
+}
+
+// best2 is whichever of a and b the server suggested in their group.
+func best2(a, b Asset, got map[string]SimilarGroup) Asset {
+	for _, g := range got {
+		if g.Keep == b.ID {
+			return b
+		}
+	}
+	return a
 }

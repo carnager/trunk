@@ -217,6 +217,21 @@ CREATE TABLE link_assets (
 	`
 ALTER TABLE links ADD COLUMN strip_location INTEGER NOT NULL DEFAULT 1;
 `,
+	// 9: look-alike finder. A fingerprint per file content (a 512-bit dHash
+	// of its thumbnail), and pairs a user said are not duplicates.
+	`
+CREATE TABLE fingerprints (
+	sha256 TEXT PRIMARY KEY,
+	hash   BLOB NOT NULL,
+	detail REAL NOT NULL
+);
+CREATE TABLE similar_ignored (
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	a       INTEGER NOT NULL,
+	b       INTEGER NOT NULL,
+	PRIMARY KEY (user_id, a, b)
+);
+`,
 }
 
 func migrate(d *sql.DB) error {

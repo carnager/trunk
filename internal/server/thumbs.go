@@ -107,7 +107,7 @@ func (s *Server) thumbWorker(ctx context.Context) {
 			if err != nil || a.Deleted {
 				continue
 			}
-			s.ensureThumbs(ctx, a)
+			s.fingerprint(ctx, a) // renders the thumbnails first
 		}
 	}
 }

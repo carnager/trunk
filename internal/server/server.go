@@ -103,6 +103,7 @@ func (s *Server) Run(ctx context.Context) {
 	}
 	go s.janitor(ctx)
 	go s.fillPlaces(ctx)
+	go s.fingerprinter(ctx)
 }
 
 // Handler returns the HTTP handler for the API.
@@ -126,6 +127,8 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("DELETE /api/v1/assets/{id}/edit", s.auth(s.handleDeleteEdit))
 	m.HandleFunc("GET /api/v1/assets/{id}/thumb/{size}", s.auth(s.handleThumb))
 	m.HandleFunc("POST /api/v1/assets/trash", s.auth(s.handleTrash))
+	m.HandleFunc("GET /api/v1/similar", s.auth(s.handleSimilar))
+	m.HandleFunc("POST /api/v1/similar/ignore", s.auth(s.handleSimilarIgnore))
 	m.HandleFunc("POST /api/v1/assets/restore", s.auth(s.handleRestore))
 	m.HandleFunc("POST /api/v1/assets/delete", s.auth(s.handleDelete))
 
@@ -174,6 +177,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			"video_posters": media.HaveFFmpeg(),
 			"tus":           true,
 			"edits":         true,
+			"similar":       true,
 			"source_sha256": true,
 			"albums":        true,
 			"shared_albums": true,
