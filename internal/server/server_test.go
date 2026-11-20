@@ -1658,3 +1658,78 @@ func TestMotionFileDeletedWithPhoto(t *testing.T) {
 		t.Errorf("clip left behind after deleting its photo: %v", err)
 	}
 }
+
+func TestAdjust(t *testing.T) {
+	e := newEnv(t)
+	alice := e.login("alice", "phone")
+	bob := e.login("bob", "phone")
+	// A scanned series: no EXIF, dates from the file names.
+	a := e.upload(alice, "IMG_20240101_100000.jpg", testJPEG(t, 64, 48, 140, false), 201)
+	b := e.upload(alice, "IMG_20240101_100500.jpg", testJPEG(t, 64, 48, 141, false), 201)
+	gps := e.upload(alice, "gps.jpg", testJPEG(t, 64, 48, 142, true), 201) // has a position (and a place)
+	theirs := e.upload(bob, "x.jpg", testJPEG(t, 64, 48, 143, false), 201)
+
+	type out struct{ Assets []Asset }
+	var res out
+	// The earliest gets the new time; the other keeps its five minutes.
+	e.json("POST", "/api/v1/assets/adjust", alice, map[string]any{"ids": []int64{b.ID, a.ID}, "local_time": "1987-07-12T15:30:00", "tz_offset": 120}, 200, &res)
+	byID := map[int64]Asset{}
+	for _, x := range res.Assets {
+		byID[x.ID] = x
+	}
+	if byID[a.ID].LocalTime != "1987-07-12T15:30:00" || byID[b.ID].LocalTime != "1987-07-12T15:35:00" ||
+		byID[a.ID].TakenAt.Format(time.RFC3339) != "1987-07-12T13:30:00Z" || *byID[a.ID].TZOffset != 120 {
+		t.Fatalf("set time: %+v / %+v", byID[a.ID], byID[b.ID])
+	}
+	// A clock an hour behind.
+	e.json("POST", "/api/v1/assets/adjust", alice, map[string]any{"ids": []int64{a.ID}, "shift_minutes": 60}, 200, &res)
+	if res.Assets[0].LocalTime != "1987-07-12T16:30:00" {
+		t.Errorf("shift: %s", res.Assets[0].LocalTime)
+	}
+
+	// Where: a town found by name; a wrong position goes.
+	var found struct{ Places []PlaceHit }
+	e.json("GET", "/api/v1/places?q=wien", alice, nil, 200, &found)
+	if len(found.Places) == 0 || found.Places[0].CC != "AT" {
+		t.Fatalf("places: %+v", found)
+	}
+	wien := found.Places[0].ID
+	e.json("POST", "/api/v1/assets/adjust", alice, map[string]any{"ids": []int64{gps.ID, a.ID}, "place_id": wien}, 200, &res)
+	for _, x := range res.Assets {
+		if x.Place == nil || x.Place.CC != "AT" || x.Lat != nil {
+			t.Errorf("place set: %+v", x)
+		}
+	}
+
+	// No place at all; the background filler must not bring it back.
+	e.json("POST", "/api/v1/assets/adjust", alice, map[string]any{"ids": []int64{gps.ID}, "clear_place": true}, 200, &res)
+	e.srv.fillPlaces(context.Background())
+	var after Asset
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", gps.ID), alice, nil, 200, &after)
+	if after.Place != nil || after.Lat != nil {
+		t.Errorf("place cleared: %+v %v", after.Place, after.Lat)
+	}
+
+	// The change reaches other devices.
+	var changes struct {
+		Assets []Asset
+	}
+	e.json("GET", "/api/v1/changes?since=0", alice, nil, 200, &changes)
+	inFeed := false
+	for _, x := range changes.Assets {
+		if x.ID == b.ID {
+			inFeed = true
+			if x.LocalTime != "1987-07-12T15:35:00" {
+				t.Errorf("feed has old time: %s", x.LocalTime)
+			}
+		}
+	}
+	if !inFeed {
+		t.Error("adjusted photo not in the feed")
+	}
+
+	// Only one's own; nonsense refused.
+	e.json("POST", "/api/v1/assets/adjust", alice, map[string]any{"ids": []int64{theirs.ID}, "shift_minutes": 5}, 404, nil)
+	e.json("POST", "/api/v1/assets/adjust", alice, map[string]any{"ids": []int64{a.ID}, "local_time": "yesterday"}, 400, nil)
+	e.json("POST", "/api/v1/assets/adjust", alice, map[string]any{"ids": []int64{a.ID}, "place_id": 1}, 400, nil)
+}

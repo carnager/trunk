@@ -133,6 +133,8 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/v1/assets/{id}/thumb/{size}", s.auth(s.handleThumb))
 	m.HandleFunc("POST /api/v1/assets/trash", s.auth(s.handleTrash))
 	m.HandleFunc("GET /api/v1/similar", s.auth(s.handleSimilar))
+	m.HandleFunc("POST /api/v1/assets/adjust", s.auth(s.handleAdjust))
+	m.HandleFunc("GET /api/v1/places", s.auth(s.handlePlaces))
 	m.HandleFunc("POST /api/v1/similar/ignore", s.auth(s.handleSimilarIgnore))
 	m.HandleFunc("POST /api/v1/assets/restore", s.auth(s.handleRestore))
 	m.HandleFunc("POST /api/v1/assets/delete", s.auth(s.handleDelete))
@@ -184,6 +186,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			"edits":         true,
 			"similar":       true,
 			"motion":        true,
+			"adjust":        true,
 			"source_sha256": true,
 			"albums":        true,
 			"shared_albums": true,

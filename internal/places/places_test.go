@@ -57,3 +57,36 @@ func TestMatches(t *testing.T) {
 		t.Error("Vienna matches münchen")
 	}
 }
+
+func TestSearch(t *testing.T) {
+	first := func(q string) string {
+		r := Search(q, 5)
+		if len(r) == 0 {
+			return ""
+		}
+		n := r[0].In(language.German)
+		return n.City + ", " + n.CC
+	}
+	for q, want := range map[string]string{
+		"berlin":   "Berlin, DE", // the capital, not Berlín in Honduras
+		"Wien":     "Wien, AT",
+		"vienna":   "Wien, AT", // an English name finds it too
+		"münchen":  "München, DE",
+		"paris":    "Paris, FR",
+		"schwelm":  "Schwelm, DE",
+		"lichtens": "", // filled below: a prefix finds something
+	} {
+		if want == "" {
+			continue
+		}
+		if got := first(q); got != want {
+			t.Errorf("%q: %q, want %q", q, got, want)
+		}
+	}
+	if len(Search("lichtens", 5)) == 0 {
+		t.Error("prefix finds nothing")
+	}
+	if len(Search("", 5)) != 0 || len(Search("zzqqxx", 5)) != 0 {
+		t.Error("nonsense finds something")
+	}
+}

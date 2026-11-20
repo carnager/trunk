@@ -10,6 +10,7 @@ import (
 	"compress/gzip"
 	_ "embed"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ type Place struct {
 	Lat     float64
 	Lon     float64
 	Country string // ISO 3166 code, e.g. AT
+	Pop     int    // population, for ranking search results
 	region  string // GeoNames admin1 key, e.g. AT.09
 	names   []string
 	aka     []string // other names, for search
@@ -74,6 +76,9 @@ func load() {
 				p := &Place{ID: id, Lat: lat, Lon: lon, Country: f[4], region: f[4] + "." + f[5], names: f[6 : 6+n]}
 				if alts := f[6+n]; alts != "" {
 					p.aka = strings.Split(alts, "|")
+				}
+				if len(f) > 7+n {
+					p.Pop, _ = strconv.Atoi(f[7+n])
 				}
 				byID[id] = p
 				k := cell(lat, lon)
@@ -195,4 +200,53 @@ func (p *Place) Matches(query string) bool {
 		}
 	}
 	return false
+}
+
+// Search finds towns by name, in any language: names that match exactly
+// first, then names that start with the query, then names that contain it;
+// among equals, bigger towns first. query is matched case-insensitively.
+func Search(query string, limit int) []*Place {
+	load()
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return nil
+	}
+	type hit struct {
+		p    *Place
+		rank int // 0 exact, 1 prefix, 2 contained
+	}
+	var hits []hit
+	for _, p := range byID {
+		best := 3
+		for _, set := range [][]string{p.names, p.aka} {
+			for _, n := range set {
+				if n == "" {
+					continue
+				}
+				l := strings.ToLower(n)
+				switch {
+				case l == q:
+					best = 0
+				case best > 1 && strings.HasPrefix(l, q):
+					best = 1
+				case best > 2 && strings.Contains(l, q):
+					best = 2
+				}
+			}
+		}
+		if best < 3 {
+			hits = append(hits, hit{p, best})
+		}
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].rank != hits[j].rank {
+			return hits[i].rank < hits[j].rank
+		}
+		return hits[i].p.Pop > hits[j].p.Pop
+	})
+	out := make([]*Place, 0, min(limit, len(hits)))
+	for _, h := range hits[:min(limit, len(hits))] {
+		out = append(out, h.p)
+	}
+	return out
 }

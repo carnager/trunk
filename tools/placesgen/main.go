@@ -30,8 +30,8 @@ func main() {
 	flag.Parse()
 
 	type city struct {
-		id, name, lat, lon, cc, admin1 string
-		alts                           []string
+		id, name, lat, lon, cc, admin1, pop string
+		alts                                []string
 	}
 	var cities []city
 	want := map[string]bool{}
@@ -45,7 +45,7 @@ func main() {
 		case "PPLX", "PPLH", "PPLQ", "PPLW", "PPLCH":
 			return
 		}
-		c := city{id: f[0], name: f[1], lat: trim(f[4]), lon: trim(f[5]), cc: f[8], admin1: f[10]}
+		c := city{id: f[0], name: f[1], lat: trim(f[4]), lon: trim(f[5]), cc: f[8], admin1: f[10], pop: f[14]}
 		seen := map[string]bool{strings.ToLower(f[1]): true}
 		for _, a := range append([]string{f[2]}, strings.Split(f[3], ",")...) {
 			if a == "" || len(a) > 40 || !latin(a) || seen[strings.ToLower(a)] {
@@ -116,13 +116,13 @@ func main() {
 		}
 		fmt.Fprintln(w)
 	}
-	// Cities: C id lat lon cc admin1 name name_<lang>... alts(|)
+	// Cities: C id lat lon cc admin1 name name_<lang>... alts(|) population
 	for _, c := range cities {
 		fmt.Fprintf(w, "C\t%s\t%s\t%s\t%s\t%s\t%s", c.id, c.lat, c.lon, c.cc, c.admin1, c.name)
 		for _, l := range langs {
 			fmt.Fprintf(w, "\t%s", localName(names[l][c.id].name, c.name))
 		}
-		fmt.Fprintf(w, "\t%s\n", strings.Join(c.alts, "|"))
+		fmt.Fprintf(w, "\t%s\t%s\n", strings.Join(c.alts, "|"), c.pop)
 	}
 	if err := w.Flush(); err != nil {
 		log.Fatal(err)

@@ -159,6 +159,20 @@ location key blanked, in place, so size, pixels, date and camera stay as they ar
 keep working. Formats trunk cannot clean (HEIC, for one) are replaced by their preview JPEG when they
 have a location. Trashed photos leave the link; revoked and expired links show nothing.
 
+## Correcting date and place
+
+| Call | |
+|---|---|
+| `GET /places?q=wien` | → `{"places": [{"id", "city", "region", "country", "cc", "lat", "lon"}]}`: towns by name, in any language; exact names first, then bigger towns. In the caller's language (`Accept-Language`) |
+| `POST /assets/adjust` | `{"ids": [..]}` plus `"shift_minutes"`, or `"local_time"` (`2006-01-02T15:04:05`) with optional `"tz_offset"`; and/or `"place_id"` or `"clear_place": true` → `{"assets": [..]}` |
+
+For scans, cameras with a wrong clock, files that lost their metadata. `local_time` sets the
+earliest of the photos to that time and moves the others by the same amount, so a series stays in
+order; `shift_minutes` moves them all. A `place_id` sets the town and drops a position the photos
+had (it was wrong); `clear_place` leaves them without place and position. Only the database
+changes, not the files, so their own metadata stays; the changes reach clients through the feed.
+Only one's own photos.
+
 ## Motion photos
 
 JPEGs with a short video appended (Pixel, Samsung and others) are recognised on upload, in both
