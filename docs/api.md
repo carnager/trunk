@@ -35,6 +35,8 @@ reports `version`, `api`, `trash_days`, `max_upload`, `thumb_sizes` and `feature
   "lat": 52.52, "lon": 13.41, "alt": 34.1,
   "make": "Google", "model": "Pixel 5", "lens": "…",
   "f_number": 1.73, "exposure": 0.042, "iso": 622, "focal_length": 4.38,
+  "place": {"city": "Wien", "country": "Österreich", "cc": "AT"},
+  "caption": "Stephansdom im Schnee",
   "duration_ms": 32777,
   "edited_at": "…", "original_sha256": "…", "original_size": 3100000, "original_mime": "image/heic",
   "favorite": false, "trashed_at": null, "trash_expires_at": null,
@@ -49,6 +51,10 @@ reports `version`, `api`, `trash_days`, `max_upload`, `thumb_sizes` and `feature
   `local_time` the wall clock where the photo was taken. Without it, the offset is unknown,
   `local_time` is what the camera showed, and `taken_at` is that same wall-clock time labelled
   UTC. Show `local_time` to people; sort by `taken_at`.
+- **Place** is the nearest town (at least 1000 inhabitants, within 30 km) to `lat`/`lon`, looked
+  up offline. Names follow the request's `Accept-Language` where GeoNames has them (German so
+  far), English otherwise. `region` is left out when it only repeats the city (Wien, Berlin).
+- **Caption** is free text, set with `PATCH`; a Google Takeout import brings Google's descriptions.
 - Where the time comes from, in order: EXIF/QuickTime metadata, a timestamp in the file name
   (`IMG_20240131_142530`, `PXL_…`, `VID_…`, `Screenshot_…`, `signal-2024-01-31-…`), the
   client's `mtime`, upload time. For Android videos, which only store UTC, the offset is
@@ -57,7 +63,7 @@ reports `version`, `api`, `trash_days`, `max_upload`, `thumb_sizes` and `feature
 | | |
 |---|---|
 | `GET /assets/{id}` | one asset |
-| `PATCH /assets/{id}` | `{"favorite": true}` → the updated asset |
+| `PATCH /assets/{id}` | `{"favorite": true}` and/or `{"caption": "…"}` (empty clears it) → the updated asset |
 | `GET /assets/{id}/file` | the current file (the edit, if there is one); supports `Range` for video seeking. Use this to show or share. |
 | `GET /assets/{id}/original` | the file as first uploaded, even after edits |
 | `PUT /assets/{id}/edit` | raw bytes of an edited photo (`X-Sha256` optional) → the updated asset. See *Edits*. |

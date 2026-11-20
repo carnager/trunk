@@ -19,6 +19,7 @@ import (
 
 	"github.com/carnager/trunk/internal/db"
 	"github.com/carnager/trunk/internal/media"
+	"github.com/carnager/trunk/internal/places"
 )
 
 // ingestReq describes a finished upload waiting in the uploads directory.
@@ -40,6 +41,7 @@ type Hints struct {
 	Lat, Lon *float64
 	Alt      *float64
 	Favorite bool
+	Caption  string
 }
 
 var errHashMismatch = errors.New("sha256 does not match the uploaded data")
@@ -101,7 +103,7 @@ func (s *Server) ingest(ctx context.Context, q ingestReq) (a *Asset, created boo
 	abs := filepath.Join(s.originals, filepath.FromSlash(rel))
 	os.Chtimes(abs, taken, taken) // file managers then sort by capture time too
 
-	id, err := s.insertAsset(ctx, q, rel, info, st.Size(), taken, q.Hints != nil && q.Hints.Favorite)
+	id, err := s.insertAsset(ctx, q, rel, info, st.Size(), taken, q.Hints)
 	if err != nil {
 		os.Rename(abs, q.TmpPath) // put it back so the deferred cleanup removes it
 		return nil, false, err
@@ -194,7 +196,11 @@ func (s *Server) place(tmp, dir, name string) (string, error) {
 	return "", fmt.Errorf("no free file name for %s in %s", name, dir)
 }
 
-func (s *Server) insertAsset(ctx context.Context, q ingestReq, rel string, in media.Info, size int64, taken time.Time, fav bool) (int64, error) {
+func (s *Server) insertAsset(ctx context.Context, q ingestReq, rel string, in media.Info, size int64, taken time.Time, h *Hints) (int64, error) {
+	fav, caption := false, ""
+	if h != nil {
+		fav, caption = h.Favorite, strings.TrimSpace(h.Caption)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -207,12 +213,12 @@ func (s *Server) insertAsset(ctx context.Context, q ingestReq, rel string, in me
 	now := time.Now().UnixMilli()
 	res, err := tx.ExecContext(ctx, `INSERT INTO assets (user_id, seq, sha256, path, orig_name, kind, mime, size,
 		taken_at, tz_offset, width, height, orientation, duration_ms, lat, lon, alt, make, model, lens,
-		f_number, exposure, iso, focal_length, favorite, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		f_number, exposure, iso, focal_length, favorite, place_id, caption, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		q.UserID, seq, q.SHA256, rel, q.Name, in.Kind, in.MIME, size,
 		taken.UnixMilli(), in.TZOffset, nz(in.Width), nz(in.Height), nz(in.Orientation), nz(in.DurationMS),
 		in.Lat, in.Lon, in.Alt, ns(in.Make), ns(in.Model), ns(in.Lens),
-		nzf(in.FNumber), nzf(in.Exposure), nz(in.ISO), nzf(in.FocalLength), boolInt(fav), now, now)
+		nzf(in.FNumber), nzf(in.Exposure), nz(in.ISO), nzf(in.FocalLength), boolInt(fav), placeOf(in.Lat, in.Lon), ns(caption), now, now)
 	if err != nil {
 		return 0, err
 	}
@@ -229,6 +235,18 @@ func (s *Server) insertAsset(ctx context.Context, q ingestReq, rel string, in me
 		}
 	}
 	return id, tx.Commit()
+}
+
+// placeOf is the GeoNames id of the nearest town: 0 if none is near, NULL
+// without a position.
+func placeOf(lat, lon *float64) any {
+	if lat == nil || lon == nil {
+		return nil
+	}
+	if p := places.Nearest(*lat, *lon); p != nil {
+		return p.ID
+	}
+	return 0
 }
 
 func addHash(ctx context.Context, x db.Execer, userID int64, sha string, assetID int64, kind string) error {

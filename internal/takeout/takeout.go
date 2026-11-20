@@ -211,6 +211,7 @@ func (m multiCloser) Close() error {
 // Sidecar is the part of Google's per-photo JSON that matters here.
 type Sidecar struct {
 	Title          string `json:"title"`
+	Description    string `json:"description"`
 	PhotoTakenTime *struct {
 		Timestamp string `json:"timestamp"`
 	} `json:"photoTakenTime"`

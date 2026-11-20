@@ -252,7 +252,7 @@ func hints(sc *Sidecar) *server.Hints {
 	if sc == nil {
 		return nil
 	}
-	h := &server.Hints{TakenAt: sc.Taken(), Favorite: sc.Favorited}
+	h := &server.Hints{TakenAt: sc.Taken(), Favorite: sc.Favorited, Caption: sc.Description}
 	if lat, lon, alt, ok := sc.Location(); ok {
 		h.Lat, h.Lon = &lat, &lon
 		if alt != 0 {

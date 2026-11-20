@@ -115,7 +115,8 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 		}
 		sess.Admin = admin == 1
 		s.touchDevice(sess.DeviceID)
-		h(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, &sess)))
+		ctx := context.WithValue(r.Context(), ctxKey{}, &sess)
+		h(w, r.WithContext(withLanguage(ctx, r)))
 	}
 }
 

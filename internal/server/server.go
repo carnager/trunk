@@ -101,6 +101,7 @@ func (s *Server) Run(ctx context.Context) {
 		go s.thumbWorker(ctx)
 	}
 	go s.janitor(ctx)
+	go s.fillPlaces(ctx)
 }
 
 // Handler returns the HTTP handler for the API.

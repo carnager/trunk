@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // Importer adds files to one user's library outside of HTTP, e.g. from a
@@ -54,11 +55,20 @@ func (im *Importer) Add(ctx context.Context, r io.Reader, name string, h *Hints)
 	return im.AddSpooled(ctx, sp, name, h)
 }
 
-// AddSpooled is Add for a spooled file, which it takes over.
+// AddSpooled is Add for a spooled file, which it takes over. An asset that is
+// already there gets the hint's caption if it has none, so running an import
+// again fills in what an older import left out.
 func (im *Importer) AddSpooled(ctx context.Context, sp Spooled, name string, h *Hints) (a *Asset, created bool, err error) {
-	return im.s.ingest(ctx, ingestReq{
+	a, created, err = im.s.ingest(ctx, ingestReq{
 		UserID: im.userID, UserName: im.userName, TmpPath: sp.path, Name: name, SHA256: sp.sha256, Hints: h,
 	})
+	if err == nil && !created && h != nil && a.Caption == "" && strings.TrimSpace(h.Caption) != "" {
+		if err := im.s.mutate(ctx, im.userID, []int64{a.ID}, `caption = ?`, strings.TrimSpace(h.Caption)); err != nil {
+			return a, created, err
+		}
+		a, err = im.s.getAsset(ctx, im.userID, a.ID)
+	}
+	return a, created, err
 }
 
 // Edit makes the file read from r the current version of asset id, keeping

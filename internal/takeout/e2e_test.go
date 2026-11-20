@@ -103,6 +103,7 @@ func writeZip(t *testing.T, path string, files map[string][]byte) {
 func sidecarJSON(title string, ts int64, lat, lon float64, fav bool) []byte {
 	b, _ := json.Marshal(map[string]any{
 		"title":          title,
+		"description":    map[bool]string{true: "Lieblingsbild"}[fav],
 		"photoTakenTime": map[string]string{"timestamp": fmt.Sprint(ts)},
 		"geoData":        map[string]float64{"latitude": lat, "longitude": lon, "altitude": 0},
 		"favorited":      fav,
@@ -207,6 +208,9 @@ func testImport(t *testing.T, format string) {
 	if !imgA.Favorite || imgA.Lat == nil || *imgA.Lat != 52.52 {
 		t.Errorf("IMG_A favourite %v, location %v", imgA.Favorite, imgA.Lat)
 	}
+	if imgA.Caption != "Lieblingsbild" || imgA.Place == nil || imgA.Place.City != "Berlin" {
+		t.Errorf("IMG_A caption %q place %+v", imgA.Caption, imgA.Place)
+	}
 	if imgA.EditedAt == nil || imgA.SHA256 == imgA.OriginalSHA256 {
 		t.Errorf("IMG_A edit not applied: %+v", imgA)
 	}
@@ -226,7 +230,8 @@ func testImport(t *testing.T, format string) {
 		t.Errorf("album: %+v", albums)
 	}
 
-	// Again: nothing new, nothing doubled.
+	// Again: nothing new, nothing doubled, but captions an older import missed are filled in.
+	srv.DB().Exec(`UPDATE assets SET caption = NULL`)
 	res = run()
 	if res.Added != 0 || res.Existing != 5 || res.AlbumsCreated != 0 || res.AlbumsUpdated != 1 || res.Failed != 0 {
 		t.Errorf("second run: %+v", res)
@@ -234,5 +239,8 @@ func testImport(t *testing.T, format string) {
 	assets, albums = sync()
 	if len(assets) != 3 || len(albums) != 1 || len(albums[0].AssetIDs) != 2 {
 		t.Errorf("after second run: %d assets, albums %+v", len(assets), albums)
+	}
+	if assets["IMG_A.jpg"].Caption != "Lieblingsbild" {
+		t.Errorf("caption not restored by second import: %q", assets["IMG_A.jpg"].Caption)
 	}
 }

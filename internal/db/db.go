@@ -161,6 +161,13 @@ CREATE TABLE album_assets (
 );
 CREATE INDEX album_assets_asset ON album_assets(asset_id);
 `,
+	// 4: place names and captions
+	`
+-- GeoNames id of the nearest town; NULL = not looked up yet, 0 = none near.
+ALTER TABLE assets ADD COLUMN place_id INTEGER;
+ALTER TABLE assets ADD COLUMN caption TEXT;
+CREATE INDEX assets_place ON assets(place_id) WHERE place_id > 0;
+`,
 }
 
 func migrate(d *sql.DB) error {

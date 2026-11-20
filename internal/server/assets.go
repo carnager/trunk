@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/carnager/trunk/internal/db"
+	"github.com/carnager/trunk/internal/places"
+	"golang.org/x/text/language"
 )
 
 // Asset is one photo or video as the API presents it. A deleted asset is sent
@@ -48,6 +50,9 @@ type Asset struct {
 	Exposure    float64  `json:"exposure,omitempty"` // seconds
 	ISO         int      `json:"iso,omitempty"`
 	FocalLength float64  `json:"focal_length,omitempty"`
+	// The nearest town to Lat/Lon, in the language the client asked for.
+	Place   *places.Names `json:"place,omitempty"`
+	Caption string        `json:"caption,omitempty"`
 
 	// Set once the asset has been edited: the current file differs from the
 	// first upload, which /original still returns.
@@ -63,6 +68,7 @@ type Asset struct {
 	UpdatedAt      *time.Time `json:"updated_at,omitempty"`
 
 	userID   int64
+	placeID  int64
 	path     string // current file, relative to the originals dir
 	origPath string // first upload, if edited
 }
@@ -70,7 +76,7 @@ type Asset struct {
 const assetCols = `id, user_id, seq, sha256, path, orig_name, kind, mime, size, taken_at, tz_offset,
 	width, height, orientation, duration_ms, lat, lon, alt, make, model, lens, f_number, exposure, iso,
 	focal_length, favorite, trashed_at, deleted_at, created_at, updated_at,
-	orig_path, orig_sha256, orig_size, orig_mime, edited_at`
+	orig_path, orig_sha256, orig_size, orig_mime, edited_at, place_id, caption`
 
 type scanner interface{ Scan(...any) error }
 
@@ -85,11 +91,13 @@ func (s *Server) scanAsset(sc scanner) (*Asset, error) {
 		trashed, deleted                 sql.NullInt64
 		oPath, oSHA, oMIME               sql.NullString
 		oSize, edited                    sql.NullInt64
+		placeID                          sql.NullInt64
+		caption                          sql.NullString
 	)
 	err := sc.Scan(&a.ID, &a.userID, &a.Seq, &a.SHA256, &a.path, &a.Name, &a.Kind, &a.MIME, &a.Size,
 		&taken, &tz, &w, &h, &orient, &dur, &lat, &lon, &alt, &mk, &model, &lens, &fnum, &expo, &iso,
 		&focal, &fav, &trashed, &deleted, &created, &updated,
-		&oPath, &oSHA, &oSize, &oMIME, &edited)
+		&oPath, &oSHA, &oSize, &oMIME, &edited, &placeID, &caption)
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +124,7 @@ func (s *Server) scanAsset(sc scanner) (*Asset, error) {
 		exp := tt.AddDate(0, 0, s.cfg.TrashDays)
 		a.TrashedAt, a.TrashExpiresAt = &tt, &exp
 	}
+	a.placeID, a.Caption = placeID.Int64, caption.String
 	if edited.Valid {
 		e := time.UnixMilli(edited.Int64).UTC()
 		a.EditedAt = &e
@@ -142,7 +151,30 @@ func (s *Server) getAsset(ctx context.Context, userID, id int64) (*Asset, error)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && a.Deleted) {
 		return nil, errNotFound
 	}
+	if err == nil {
+		localize(ctx, a)
+	}
 	return a, err
+}
+
+type langKey struct{}
+
+// withLanguage remembers the request's preferred languages for place names.
+func withLanguage(ctx context.Context, r *http.Request) context.Context {
+	tags, _, _ := language.ParseAcceptLanguage(r.Header.Get("Accept-Language"))
+	return context.WithValue(ctx, langKey{}, tags)
+}
+
+// localize fills in the place names in the caller's language.
+func localize(ctx context.Context, a *Asset) {
+	if a.placeID <= 0 {
+		return
+	}
+	if p := places.ByID(a.placeID); p != nil {
+		tags, _ := ctx.Value(langKey{}).([]language.Tag)
+		n := p.In(tags...)
+		a.Place = &n
+	}
 }
 
 func (s *Server) assetFromPath(w http.ResponseWriter, r *http.Request) (*Asset, bool) {
@@ -196,6 +228,7 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 			s.internal(w, err)
 			return
 		}
+		localize(ctx, a)
 		assets = append(assets, a)
 	}
 	rows.Close()
@@ -276,17 +309,35 @@ func (s *Server) handlePatchAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Favorite *bool `json:"favorite"`
+		Favorite *bool   `json:"favorite"`
+		Caption  *string `json:"caption"`
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
+	changed := false
 	if req.Favorite != nil && *req.Favorite != a.Favorite {
-		err := s.mutate(r.Context(), a.userID, []int64{a.ID}, `favorite = ?`, boolInt(*req.Favorite))
-		if err != nil {
+		if err := s.mutate(r.Context(), a.userID, []int64{a.ID}, `favorite = ?`, boolInt(*req.Favorite)); err != nil {
 			s.internal(w, err)
 			return
 		}
+		changed = true
+	}
+	if req.Caption != nil {
+		c := strings.TrimSpace(*req.Caption)
+		if len(c) > 4000 {
+			httpError(w, http.StatusBadRequest, "caption too long")
+			return
+		}
+		if c != a.Caption {
+			if err := s.mutate(r.Context(), a.userID, []int64{a.ID}, `caption = ?`, ns(c)); err != nil {
+				s.internal(w, err)
+				return
+			}
+			changed = true
+		}
+	}
+	if changed {
 		a, _ = s.getAsset(r.Context(), a.userID, a.ID)
 	}
 	writeJSON(w, http.StatusOK, a)
@@ -475,4 +526,55 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, rel, mimeType
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 	// ServeContent handles Range, so videos stream and seek.
 	http.ServeContent(w, r, "", st.ModTime(), f)
+}
+
+// fillPlaces looks up the town for assets that have a position but no place
+// yet: everything from before trunk knew places, once. Each gets a new seq,
+// so clients learn the place with their next sync.
+func (s *Server) fillPlaces(ctx context.Context) {
+	type todo struct {
+		id       int64
+		lat, lon float64
+	}
+	var list []todo
+	rows, err := s.db.QueryContext(ctx, `SELECT id, lat, lon FROM assets
+		WHERE place_id IS NULL AND lat IS NOT NULL AND lon IS NOT NULL AND deleted_at IS NULL`)
+	if err != nil {
+		s.log.Error("places", "err", err)
+		return
+	}
+	for rows.Next() {
+		var t todo
+		if rows.Scan(&t.id, &t.lat, &t.lon) == nil {
+			list = append(list, t)
+		}
+	}
+	rows.Close()
+	if len(list) == 0 {
+		return
+	}
+	start := time.Now()
+	for i := 0; i < len(list); i += 200 {
+		batch := list[i:min(i+200, len(list))]
+		err := s.inTx(ctx, func(tx *sql.Tx, _, now int64) error {
+			for _, t := range batch {
+				seq, err := db.NextSeq(ctx, tx)
+				if err != nil {
+					return err
+				}
+				if _, err := tx.ExecContext(ctx, `UPDATE assets SET place_id = ?, seq = ?, updated_at = ? WHERE id = ?`,
+					placeOf(&t.lat, &t.lon), seq, now, t.id); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			if ctx.Err() == nil {
+				s.log.Error("places", "err", err)
+			}
+			return
+		}
+	}
+	s.log.Info("places looked up", "assets", len(list), "took", time.Since(start).Round(time.Millisecond))
 }

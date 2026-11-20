@@ -906,3 +906,53 @@ func TestAlbums(t *testing.T) {
 	}
 	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", ids[0]), tok, nil, 200, nil)
 }
+
+func TestPlacesAndCaptions(t *testing.T) {
+	e := newEnv(t)
+	tok := e.login("alice", "phone")
+	a := e.upload(tok, "IMG_berlin.jpg", testJPEG(t, 64, 48, 51, true), 201) // EXIF GPS 52.52, 13.41
+	get := func(lang string) Asset {
+		res := e.do("GET", fmt.Sprintf("/api/v1/assets/%d", a.ID), tok, nil, map[string]string{"Accept-Language": lang})
+		var out Asset
+		json.NewDecoder(res.Body).Decode(&out)
+		return out
+	}
+	if p := get("de-DE,de;q=0.9").Place; p == nil || p.City != "Berlin" || p.Country != "Deutschland" || p.CC != "DE" {
+		t.Errorf("german place: %+v", p)
+	}
+	if p := get("en").Place; p == nil || p.Country != "Germany" {
+		t.Errorf("english place: %+v", p)
+	}
+	if p := e.upload(tok, "nogps.jpg", testJPEG(t, 64, 48, 52, false), 201).Place; p != nil {
+		t.Errorf("place without GPS: %+v", p)
+	}
+
+	var start feed
+	e.json("GET", "/api/v1/changes", tok, nil, 200, &start)
+	var patched Asset
+	e.json("PATCH", fmt.Sprintf("/api/v1/assets/%d", a.ID), tok, map[string]string{"caption": "  Brandenburger Tor im Regen  "}, 200, &patched)
+	if patched.Caption != "Brandenburger Tor im Regen" {
+		t.Errorf("caption: %q", patched.Caption)
+	}
+	var f feed
+	e.json("GET", fmt.Sprintf("/api/v1/changes?since=%d", start.Cursor), tok, nil, 200, &f)
+	if len(f.Assets) != 1 || f.Assets[0].Caption != "Brandenburger Tor im Regen" {
+		t.Errorf("caption change in feed: %+v", f.Assets)
+	}
+	var cleared Asset
+	e.json("PATCH", fmt.Sprintf("/api/v1/assets/%d", a.ID), tok, map[string]string{"caption": ""}, 200, &cleared)
+	if cleared.ID != a.ID || cleared.Caption != "" {
+		t.Error("caption not cleared")
+	}
+
+	// Assets from before places existed get theirs in the background, with a new seq.
+	e.srv.db.Exec(`UPDATE assets SET place_id = NULL WHERE id = ?`, a.ID)
+	var before feed
+	e.json("GET", "/api/v1/changes", tok, nil, 200, &before)
+	e.srv.fillPlaces(context.Background())
+	var after feed
+	e.json("GET", fmt.Sprintf("/api/v1/changes?since=%d", before.Cursor), tok, nil, 200, &after)
+	if len(after.Assets) != 1 || after.Assets[0].Place == nil || after.Assets[0].Place.City != "Berlin" {
+		t.Errorf("backfilled place: %+v", after.Assets)
+	}
+}
