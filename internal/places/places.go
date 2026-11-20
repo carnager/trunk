@@ -213,12 +213,16 @@ func Search(query string, limit int) []*Place {
 	}
 	type hit struct {
 		p    *Place
-		rank int // 0 exact, 1 prefix, 2 contained
+		rank int
 	}
 	var hits []hit
 	for _, p := range byID {
-		best := 3
-		for _, set := range [][]string{p.names, p.aka} {
+		// Ranks: the real names (main and translated) before the other
+		// names (spellings, transliterations; hundreds for big cities) at
+		// each level: exact 0/1, prefix 2/3, inside 4 (real names only, the
+		// others would match anything).
+		best := 5
+		for k, set := range [][]string{p.names, p.aka} {
 			for _, n := range set {
 				if n == "" {
 					continue
@@ -226,15 +230,15 @@ func Search(query string, limit int) []*Place {
 				l := strings.ToLower(n)
 				switch {
 				case l == q:
-					best = 0
-				case best > 1 && strings.HasPrefix(l, q):
-					best = 1
-				case best > 2 && strings.Contains(l, q):
-					best = 2
+					best = min(best, 0+k)
+				case strings.HasPrefix(l, q):
+					best = min(best, 2+k)
+				case k == 0 && strings.Contains(l, q):
+					best = min(best, 4)
 				}
 			}
 		}
-		if best < 3 {
+		if best < 5 {
 			hits = append(hits, hit{p, best})
 		}
 	}

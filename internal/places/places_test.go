@@ -86,6 +86,13 @@ func TestSearch(t *testing.T) {
 	if len(Search("lichtens", 5)) == 0 {
 		t.Error("prefix finds nothing")
 	}
+	// Other spellings rank after real names: Austria's Wien… towns before
+	// Thailand's Wieng Tai.
+	for _, p := range Search("wien", 6) {
+		if p.Country == "TH" {
+			t.Error("a town found by another spelling ranks among the first")
+		}
+	}
 	if len(Search("", 5)) != 0 || len(Search("zzqqxx", 5)) != 0 {
 		t.Error("nonsense finds something")
 	}
