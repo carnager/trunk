@@ -189,10 +189,13 @@ func (a *tarArchive) index(log io.Writer) ([]Entry, error) {
 		bytesSeen += h.Size
 		if time.Since(last) > 3*time.Second {
 			last = time.Now()
-			fmt.Fprintf(log, "  listing %s: %d files, %.1f GB\n", filepath.Base(a.path), len(list), float64(bytesSeen)/(1<<30))
+			fmt.Fprintf(log, "  listing %s: %d files, %.1f GB so far\n", filepath.Base(a.path), len(list), float64(bytesSeen)/(1<<30))
 		}
 		return nil
 	})
+	if err == nil {
+		fmt.Fprintf(log, "  %s: %d files, %.1f GB\n", filepath.Base(a.path), len(list), float64(bytesSeen)/(1<<30))
+	}
 	return list, err
 }
 
