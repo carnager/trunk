@@ -1,40 +1,39 @@
 # trunk-ai
 
-Content search for trunk: "Hund am Strand", "snow in the forest", "Geburtstagskuchen".
+Content search and faces for trunk.
 
-trunk itself runs no model; the small machines it lives on are not made for that. trunk-ai runs
-where there is computing power, a desktop for instance, whenever convenient:
+trunk only stores and compares vectors. trunk-ai makes them:
 
-- it fetches the thumbnails of photos and videos that have no vector yet (the whole household's;
-  it needs an admin account), computes one per picture with CLIP ViT-B/32 and sends them to trunk
-  (about 70 a second on a modern CPU, no GPU needed);
-- it finds the faces in every photo (YuNet) with a vector each (SFace) and sends them; trunk groups
-  them into people (about 11 photos a second);
-- it uploads the matching text model (multilingual, quantised for phones, 135 MB) to trunk, from
-  where apps download it, so they can turn search text into a vector themselves.
+- **Content**: CLIP vectors for every photo and video, about 70 per second on a desktop CPU. No
+  GPU needed.
+- **Faces**: finds faces and computes a vector for each. trunk groups them into people, which you
+  then name in the app.
+- **Text model**: uploads a small multilingual model (135 MB) to trunk. The app downloads it
+  from there and turns search text into a vector on the phone.
 
-trunk stores the vectors and compares. Search works whenever trunk is up; photos that arrived
-since the last run of trunk-ai are found by content after the next.
+New photos become searchable by content after the next run.
 
 ## Build and run
 
-Needs the ONNX Runtime library (Arch: `pacman -S onnxruntime-cpu`, 1.29) and cgo:
+You need cgo and ONNX Runtime (Arch: `onnxruntime-cpu`).
 
 ```sh
-cd ai && go build -o trunk-ai .
+go build -o trunk-ai .
 ./trunk-ai index -server https://photos.example.org -user alice
-./trunk-ai search -server https://photos.example.org -user alice "Schnee im Wald"
+./trunk-ai search -server https://photos.example.org -user alice "snow in the forest"
 ```
 
-On the machine trunk runs on, `contrib/trunk-ai.service` and `.timer` run it hourly at low
-priority (at most two cores) after new photos; instructions are in the service file.
+It needs an admin account, because it indexes the whole household. It asks for the password
+once and remembers the login in `~/.config/trunk-ai`. The models are downloaded on first use to
+`~/.cache/trunk-ai`, about 1 GB, pinned by checksum. `index` only does what's missing.
 
-The models (pinned by checksum) are downloaded from Hugging Face on first use into
-`~/.cache/trunk-ai`; the login is remembered in `~/.config/trunk-ai`. Run `index` from a timer or
-by hand; it only does what is missing.
+To run it next to trunk: `contrib/trunk-ai.service` and `.timer` run it hourly, at low priority
+and on at most two cores. Setup steps are in the service file.
 
-Models: faces by [YuNet](https://huggingface.co/opencv/face_detection_yunet) (MIT) and
-[SFace](https://huggingface.co/opencv/face_recognition_sface) (Apache 2.0) from OpenCV Zoo, chosen
-over InsightFace's, which are for non-commercial research only. [CLIP ViT-B/32](https://huggingface.co/Xenova/clip-vit-base-patch32) (OpenAI, MIT) for
-pictures, [clip-ViT-B-32-multilingual-v1](https://huggingface.co/sentence-transformers/clip-ViT-B-32-multilingual-v1)
-(Apache 2.0) for text in 50+ languages.
+## Models
+
+- [CLIP ViT-B/32](https://huggingface.co/Xenova/clip-vit-base-patch32) (MIT) for pictures
+- [clip-ViT-B-32-multilingual-v1](https://huggingface.co/sentence-transformers/clip-ViT-B-32-multilingual-v1) (Apache 2.0) for search text
+- [YuNet](https://huggingface.co/opencv/face_detection_yunet) (MIT) and [SFace](https://huggingface.co/opencv/face_recognition_sface) (Apache 2.0) for faces
+
+InsightFace would be better at faces, but its models are licensed for non-commercial use only.
