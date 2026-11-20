@@ -232,6 +232,12 @@ CREATE TABLE similar_ignored (
 	PRIMARY KEY (user_id, a, b)
 );
 `,
+	// 10: motion photos: where the video sits in the (first) file. NULL until
+	// the file was looked at, 0 for a still.
+	`
+ALTER TABLE assets ADD COLUMN motion_offset INTEGER;
+ALTER TABLE assets ADD COLUMN motion_length INTEGER;
+`,
 }
 
 func migrate(d *sql.DB) error {

@@ -29,7 +29,20 @@ func LocationPatches(path, mime string) (patches []Patch, ok bool, err error) {
 	switch mime {
 	case "image/jpeg":
 		p, err := jpegLocation(f)
-		return p, err == nil, err
+		if err != nil {
+			return nil, false, err
+		}
+		// A motion photo's video keeps a location of its own.
+		if off, n, ok, _ := MotionVideo(path); ok {
+			vp, err := mp4Location(io.NewSectionReader(f, off, n))
+			if err != nil {
+				return nil, false, err
+			}
+			for _, q := range vp {
+				p = append(p, Patch{q.Offset + off, q.Data})
+			}
+		}
+		return p, true, nil
 	case "video/mp4", "video/quicktime", "video/3gpp":
 		p, err := mp4Location(f)
 		return p, err == nil, err

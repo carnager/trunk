@@ -63,7 +63,9 @@ type Asset struct {
 	OriginalSize   int64      `json:"original_size,omitempty"`
 	OriginalMIME   string     `json:"original_mime,omitempty"`
 
-	Favorite       bool       `json:"favorite"`
+	Favorite bool `json:"favorite"`
+	// A motion photo: GET /assets/{id}/motion plays its video.
+	Motion         bool       `json:"motion,omitempty"`
 	TrashedAt      *time.Time `json:"trashed_at,omitempty"`
 	TrashExpiresAt *time.Time `json:"trash_expires_at,omitempty"`
 	CreatedAt      *time.Time `json:"created_at,omitempty"`
@@ -73,12 +75,15 @@ type Asset struct {
 	placeID  int64
 	path     string // current file, relative to the originals dir
 	origPath string // first upload, if edited
+
+	// Motion photo: the video's place in the first upload (an edit keeps no video).
+	motionOff, motionLen int64
 }
 
 const assetCols = `id, user_id, seq, sha256, path, orig_name, kind, mime, size, taken_at, tz_offset,
 	width, height, orientation, duration_ms, lat, lon, alt, make, model, lens, f_number, exposure, iso,
 	focal_length, favorite, trashed_at, deleted_at, created_at, updated_at,
-	orig_path, orig_sha256, orig_size, orig_mime, edited_at, place_id, caption`
+	orig_path, orig_sha256, orig_size, orig_mime, edited_at, place_id, caption, motion_offset, motion_length`
 
 type scanner interface{ Scan(...any) error }
 
@@ -95,11 +100,12 @@ func (s *Server) scanAsset(sc scanner) (*Asset, error) {
 		oSize, edited                    sql.NullInt64
 		placeID                          sql.NullInt64
 		caption                          sql.NullString
+		motionOff, motionLen             sql.NullInt64
 	)
 	err := sc.Scan(&a.ID, &a.userID, &a.Seq, &a.SHA256, &a.path, &a.Name, &a.Kind, &a.MIME, &a.Size,
 		&taken, &tz, &w, &h, &orient, &dur, &lat, &lon, &alt, &mk, &model, &lens, &fnum, &expo, &iso,
 		&focal, &fav, &trashed, &deleted, &created, &updated,
-		&oPath, &oSHA, &oSize, &oMIME, &edited, &placeID, &caption)
+		&oPath, &oSHA, &oSize, &oMIME, &edited, &placeID, &caption, &motionOff, &motionLen)
 	if err != nil {
 		return nil, err
 	}
@@ -127,6 +133,8 @@ func (s *Server) scanAsset(sc scanner) (*Asset, error) {
 		a.TrashedAt, a.TrashExpiresAt = &tt, &exp
 	}
 	a.placeID, a.Caption = placeID.Int64, caption.String
+	a.motionOff, a.motionLen = motionOff.Int64, motionLen.Int64
+	a.Motion = a.motionLen > 0
 	if edited.Valid {
 		e := time.UnixMilli(edited.Int64).UTC()
 		a.EditedAt = &e

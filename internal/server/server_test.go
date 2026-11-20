@@ -1510,3 +1510,81 @@ func best2(a, b Asset, got map[string]SimilarGroup) Asset {
 	}
 	return a
 }
+
+func TestMotionPhotos(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	e := newEnv(t)
+	ctx := context.Background()
+	alice := e.login("alice", "phone")
+	bob := e.login("bob", "phone")
+
+	vp := filepath.Join(t.TempDir(), "v.mp4")
+	if out, err := exec.Command("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=1:size=160x120:rate=10",
+		"-pix_fmt", "yuv420p", vp).CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg: %v %s", err, out)
+	}
+	video, _ := os.ReadFile(vp)
+	jpg := testJPEG(t, 64, 48, 120, false)
+	xmp := fmt.Sprintf(`<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF><rdf:Description GCamera:MotionPhoto="1"><Container:Directory><rdf:Seq>`+
+		`<rdf:li><Container:Item Item:Mime="image/jpeg" Item:Semantic="Primary"/></rdf:li>`+
+		`<rdf:li><Container:Item Item:Mime="video/mp4" Item:Semantic="MotionPhoto" Item:Length="%d"/></rdf:li>`+
+		`</rdf:Seq></Container:Directory></rdf:Description></rdf:RDF></x:xmpmeta>`, len(video))
+	body := append([]byte("http://ns.adobe.com/xap/1.0/\x00"), xmp...)
+	seg := []byte{0xFF, 0xE1, 0, 0}
+	binary.BigEndian.PutUint16(seg[2:], uint16(len(body)+2))
+	motion := append(append(append([]byte{0xFF, 0xD8}, seg...), body...), jpg[2:]...)
+	motion = append(motion, video...)
+
+	m := e.upload(alice, "PXL_20240601_120000000.MP.jpg", motion, 201)
+	still := e.upload(alice, "still.jpg", testJPEG(t, 64, 48, 121, false), 201)
+	if !m.Motion || still.Motion {
+		t.Fatalf("motion flags: %v %v", m.Motion, still.Motion)
+	}
+	get := func(path, tok string, hdr map[string]string) (int, []byte, http.Header) {
+		res := e.do("GET", path, tok, nil, hdr)
+		b, _ := io.ReadAll(res.Body)
+		return res.StatusCode, b, res.Header
+	}
+	code, b, h := get(fmt.Sprintf("/api/v1/assets/%d/motion", m.ID), alice, nil)
+	if code != 200 || !bytes.Equal(b, video) || h.Get("Content-Type") != "video/mp4" {
+		t.Fatalf("motion video: %d %d bytes %q", code, len(b), h.Get("Content-Type"))
+	}
+	code, b, _ = get(fmt.Sprintf("/api/v1/assets/%d/motion", m.ID), alice, map[string]string{"Range": "bytes=4-11"})
+	if code != 206 || string(b) != string(video[4:12]) {
+		t.Errorf("range: %d %q", code, b)
+	}
+	if c, _, _ := get(fmt.Sprintf("/api/v1/assets/%d/motion", still.ID), alice, nil); c != 404 {
+		t.Errorf("still: %d", c)
+	}
+	if c, _, _ := get(fmt.Sprintf("/api/v1/assets/%d/motion", m.ID), bob, nil); c != 404 {
+		t.Errorf("someone else's: %d", c)
+	}
+
+	// An edit is a plain picture; the video still comes from the first upload.
+	res := e.do("PUT", fmt.Sprintf("/api/v1/assets/%d/edit", m.ID), alice, bytes.NewReader(testJPEG(t, 40, 40, 122, false)), nil)
+	if res.StatusCode != 200 {
+		t.Fatalf("edit: %d", res.StatusCode)
+	}
+	if code, b, _ := get(fmt.Sprintf("/api/v1/assets/%d/motion", m.ID), alice, nil); code != 200 || !bytes.Equal(b, video) {
+		t.Errorf("motion after edit: %d %d", code, len(b))
+	}
+
+	// Photos from before trunk knew motion photos are looked at once, and clients hear of it.
+	e.srv.db.Exec(`UPDATE assets SET motion_offset = NULL, motion_length = NULL`)
+	var seqBefore, stillSeq int64
+	e.srv.db.QueryRow(`SELECT seq FROM assets WHERE id = ?`, m.ID).Scan(&seqBefore)
+	e.srv.db.QueryRow(`SELECT seq FROM assets WHERE id = ?`, still.ID).Scan(&stillSeq)
+	e.srv.fillMotion(ctx)
+	var after Asset
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", m.ID), alice, nil, 200, &after)
+	var seqAfter, stillAfter int64
+	var unchecked int
+	e.srv.db.QueryRow(`SELECT seq FROM assets WHERE id = ?`, m.ID).Scan(&seqAfter)
+	e.srv.db.QueryRow(`SELECT seq FROM assets WHERE id = ?`, still.ID).Scan(&stillAfter)
+	e.srv.db.QueryRow(`SELECT COUNT(*) FROM assets WHERE motion_offset IS NULL`).Scan(&unchecked)
+	if !after.Motion || seqAfter <= seqBefore || stillAfter != stillSeq || unchecked != 0 {
+		t.Errorf("backfill: motion %v seq %d→%d, still seq %d→%d, unchecked %d", after.Motion, seqBefore, seqAfter, stillSeq, stillAfter, unchecked)
+	}
+}

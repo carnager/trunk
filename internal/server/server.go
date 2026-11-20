@@ -104,6 +104,7 @@ func (s *Server) Run(ctx context.Context) {
 	go s.janitor(ctx)
 	go s.fillPlaces(ctx)
 	go s.fingerprinter(ctx)
+	go s.fillMotion(ctx)
 }
 
 // Handler returns the HTTP handler for the API.
@@ -123,6 +124,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("PATCH /api/v1/assets/{id}", s.auth(s.handlePatchAsset))
 	m.HandleFunc("GET /api/v1/assets/{id}/file", s.auth(s.handleFile))
 	m.HandleFunc("GET /api/v1/assets/{id}/original", s.auth(s.handleOriginal))
+	m.HandleFunc("GET /api/v1/assets/{id}/motion", s.auth(s.handleMotion))
 	m.HandleFunc("PUT /api/v1/assets/{id}/edit", s.auth(s.handlePutEdit))
 	m.HandleFunc("DELETE /api/v1/assets/{id}/edit", s.auth(s.handleDeleteEdit))
 	m.HandleFunc("GET /api/v1/assets/{id}/thumb/{size}", s.auth(s.handleThumb))
@@ -178,6 +180,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			"tus":           true,
 			"edits":         true,
 			"similar":       true,
+			"motion":        true,
 			"source_sha256": true,
 			"albums":        true,
 			"shared_albums": true,

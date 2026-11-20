@@ -66,6 +66,7 @@ reports `version`, `api`, `trash_days`, `max_upload`, `thumb_sizes` and `feature
 | `PATCH /assets/{id}` | `{"favorite": true}` and/or `{"caption": "…"}` (empty clears it) → the updated asset |
 | `GET /assets/{id}/file` | the current file (the edit, if there is one); supports `Range` for video seeking. Use this to show or share. |
 | `GET /assets/{id}/original` | the file as first uploaded, even after edits |
+| `GET /assets/{id}/motion` | a motion photo's video (`video/mp4`, ranges work); `404` for anything else. Assets that have one say `"motion": true` |
 | `PUT /assets/{id}/edit` | raw bytes of an edited photo (`X-Sha256` optional) → the updated asset. See *Edits*. |
 | `DELETE /assets/{id}/edit` | back to the first upload → the updated asset |
 | `GET /assets/{id}/thumb/{size}` | JPEG, upright. `small`: short side 300 px; `medium`: short side 480 px; `preview`: long side 2048 px. Never upscaled. Videos get a poster frame from about 1 s in. `404` if the file cannot be rendered. Supports `If-None-Match`. |
@@ -157,6 +158,17 @@ EXIF data and GPS fields in XMP are emptied, video location boxes (`©xyz`, `loc
 location key blanked, in place, so size, pixels, date and camera stay as they are and motion photos
 keep working. Formats trunk cannot clean (HEIC, for one) are replaced by their preview JPEG when they
 have a location. Trashed photos leave the link; revoked and expired links show nothing.
+
+## Motion photos
+
+JPEGs with a short video appended (Pixel, Samsung and others) are recognised on upload, in both
+the Motion Photo format (`Container:Directory` with the video's length) and the older MicroVideo
+one. The video has to really be an MP4 running to the end of the file; when the stated length
+does not fit (Google Photos keeps the original's in its edits) trunk finds the video itself.
+Photos from before trunk knew motion photos are looked at once in the background, and the ones
+found reach clients through the change feed. An edit is a plain picture; the video keeps coming
+from the first upload. On public links that leave out the location, the video's location is
+blanked as well.
 
 ## Look-alikes
 
