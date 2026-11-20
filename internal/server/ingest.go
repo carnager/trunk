@@ -214,13 +214,13 @@ func (s *Server) insertAsset(ctx context.Context, q ingestReq, rel string, in me
 	res, err := tx.ExecContext(ctx, `INSERT INTO assets (user_id, seq, sha256, path, orig_name, kind, mime, size,
 		taken_at, tz_offset, width, height, orientation, duration_ms, lat, lon, alt, make, model, lens,
 		f_number, exposure, iso, focal_length, favorite, place_id, caption, created_at, updated_at,
-		motion_offset, motion_length)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		motion_offset, motion_length, motion_sha256)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		q.UserID, seq, q.SHA256, rel, q.Name, in.Kind, in.MIME, size,
 		taken.UnixMilli(), in.TZOffset, nz(in.Width), nz(in.Height), nz(in.Orientation), nz(in.DurationMS),
 		in.Lat, in.Lon, in.Alt, ns(in.Make), ns(in.Model), ns(in.Lens),
 		nzf(in.FNumber), nzf(in.Exposure), nz(in.ISO), nzf(in.FocalLength), boolInt(fav), placeOf(in.Lat, in.Lon), ns(caption), now, now,
-		in.MotionOffset, in.MotionLength)
+		in.MotionOffset, in.MotionLength, ns(in.MotionSHA256))
 	if err != nil {
 		return 0, err
 	}

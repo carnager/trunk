@@ -174,12 +174,14 @@ blanked as well.
 
 | Call | |
 |---|---|
-| `GET /similar` | → `{"groups": [{"asset_ids": [..], "keep": id, "kind": "same"\|"burst"}], "pending": n}` |
+| `GET /similar` | → `{"groups": [{"asset_ids": [..], "keep": id, "kind": "same"\|"burst"\|"motion"}], "pending": n}` |
 | `POST /similar/ignore` | `{"ids": [..]}` → `204`: these are no look-alikes of each other |
 
 Finds the user's own photos that look alike, to clean up a library: `same` is one picture in
 several files (a WhatsApp copy, an export, an edit saved as a copy), `burst` are shots taken
-moments apart. Byte-identical files never get this far; uploads are deduplicated. Each photo is
+moments apart, `motion` is a video that is byte for byte the video inside one of the user's motion
+photos (Takeout exports it apart as well); its group is the photo and the video, keeping the photo.
+Byte-identical files never get this far; uploads are deduplicated. Each photo is
 fingerprinted from its thumbnail (a 512-bit difference hash plus how much detail it has) after
 upload, and in the background for older ones; `pending` counts those not done yet. Every photo in
 a group looks like every other one. `keep` is a suggestion: most pixels, then edited, favourite,

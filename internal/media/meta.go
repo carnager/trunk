@@ -55,6 +55,7 @@ type Info struct {
 	// A motion photo's video: where it starts in the file and how long it
 	// is; 0 for a still.
 	MotionOffset, MotionLength int64
+	MotionSHA256               string
 }
 
 // Sniff returns the MIME type and kind of the file at path. name is the
@@ -120,6 +121,7 @@ func Extract(path, name string) (Info, error) {
 		if mime == "image/jpeg" {
 			if off, n, ok, _ := MotionVideo(path); ok {
 				in.MotionOffset, in.MotionLength = off, n
+				in.MotionSHA256, _ = HashSection(path, off, n)
 			}
 		}
 	}

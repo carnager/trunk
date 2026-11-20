@@ -104,7 +104,10 @@ func (s *Server) Run(ctx context.Context) {
 	go s.janitor(ctx)
 	go s.fillPlaces(ctx)
 	go s.fingerprinter(ctx)
-	go s.fillMotion(ctx)
+	go func() {
+		s.fillMotion(ctx)
+		s.fillMotionHashes(ctx)
+	}()
 }
 
 // Handler returns the HTTP handler for the API.

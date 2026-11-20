@@ -243,6 +243,11 @@ ALTER TABLE assets ADD COLUMN motion_length INTEGER;
 	`
 ALTER TABLE assets ADD COLUMN motion_path TEXT;
 `,
+	// 12: the motion video's SHA-256, to know a video that is only a copy of it.
+	`
+ALTER TABLE assets ADD COLUMN motion_sha256 TEXT;
+CREATE INDEX assets_motion_sha ON assets (user_id, motion_sha256) WHERE motion_sha256 IS NOT NULL;
+`,
 }
 
 func migrate(d *sql.DB) error {

@@ -307,8 +307,11 @@ func (s *Server) adopt(ctx context.Context, userID int64, rel string) (bool, err
 	}
 	// Its motion video, if it was kept apart.
 	if mp := motionPathFor(rel); info.MotionLength == 0 {
-		if mst, err := os.Stat(filepath.Join(s.originals, filepath.FromSlash(mp))); err == nil {
-			s.db.ExecContext(ctx, `UPDATE assets SET motion_path = ?, motion_offset = 0, motion_length = ? WHERE id = ?`, mp, mst.Size(), id)
+		abs := filepath.Join(s.originals, filepath.FromSlash(mp))
+		if mst, err := os.Stat(abs); err == nil {
+			sum, _ := hashFile(abs)
+			s.db.ExecContext(ctx, `UPDATE assets SET motion_path = ?, motion_offset = 0, motion_length = ?, motion_sha256 = ? WHERE id = ?`,
+				mp, mst.Size(), ns(sum), id)
 		}
 	}
 	return true, nil

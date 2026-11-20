@@ -60,9 +60,12 @@ func (s *Server) fillMotion(ctx context.Context) {
 		if a.OriginalMIME != "" {
 			mime = a.OriginalMIME
 		}
+		var sum string
 		if mime == "image/jpeg" {
-			if o, l, ok, _ := media.MotionVideo(filepath.Join(s.originals, filepath.FromSlash(a.motionFile()))); ok {
+			abs := filepath.Join(s.originals, filepath.FromSlash(a.motionFile()))
+			if o, l, ok, _ := media.MotionVideo(abs); ok {
 				off, n = o, l
+				sum, _ = media.HashSection(abs, o, l)
 			}
 		}
 		err := s.inTx(ctx, func(tx *sql.Tx, _, now int64) error {
@@ -74,8 +77,8 @@ func (s *Server) fillMotion(ctx context.Context) {
 			if err != nil {
 				return err
 			}
-			_, err = tx.ExecContext(ctx, `UPDATE assets SET motion_offset = ?, motion_length = ?, seq = ?, updated_at = ? WHERE id = ?`,
-				off, n, seq, now, a.ID)
+			_, err = tx.ExecContext(ctx, `UPDATE assets SET motion_offset = ?, motion_length = ?, motion_sha256 = ?, seq = ?, updated_at = ? WHERE id = ?`,
+				off, n, ns(sum), seq, now, a.ID)
 			return err
 		})
 		if err != nil {
@@ -89,6 +92,34 @@ func (s *Server) fillMotion(ctx context.Context) {
 		}
 	}
 	s.log.Info("motion photos looked for", "assets", len(todo), "found", found, "took", time.Since(start).Round(time.Millisecond))
+}
+
+// fillMotionHashes hashes the videos of motion photos found before trunk
+// kept their hash, once.
+func (s *Server) fillMotionHashes(ctx context.Context) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+assetCols+` FROM assets
+		WHERE motion_length > 0 AND motion_sha256 IS NULL AND deleted_at IS NULL`)
+	if err != nil {
+		s.log.Error("motion hashes", "err", err)
+		return
+	}
+	var todo []*Asset
+	for rows.Next() {
+		if a, err := s.scanAsset(rows); err == nil {
+			todo = append(todo, a)
+		}
+	}
+	rows.Close()
+	for _, a := range todo {
+		if ctx.Err() != nil {
+			return
+		}
+		sum, err := media.HashSection(filepath.Join(s.originals, filepath.FromSlash(a.motionFile())), a.motionOff, a.motionLen)
+		if err != nil {
+			continue
+		}
+		s.db.ExecContext(ctx, `UPDATE assets SET motion_sha256 = ? WHERE id = ?`, sum, a.ID)
+	}
 }
 
 // handleMotion: GET /api/v1/assets/{id}/motion → the video of a motion photo
@@ -150,6 +181,10 @@ func (s *Server) attachMotion(ctx context.Context, a *Asset, tmp string) error {
 	if err != nil {
 		return err
 	}
+	sum, err := hashFile(tmp)
+	if err != nil {
+		return err
+	}
 	photo := a.path
 	if a.origPath != "" {
 		photo = a.origPath
@@ -167,8 +202,8 @@ func (s *Server) attachMotion(ctx context.Context, a *Asset, tmp string) error {
 		if err != nil {
 			return err
 		}
-		res, err := tx.ExecContext(ctx, `UPDATE assets SET motion_path = ?, motion_offset = 0, motion_length = ?, seq = ?, updated_at = ?
-			WHERE id = ? AND deleted_at IS NULL AND motion_path IS NULL AND COALESCE(motion_length, 0) = 0`, rel, st.Size(), seq, now, a.ID)
+		res, err := tx.ExecContext(ctx, `UPDATE assets SET motion_path = ?, motion_offset = 0, motion_length = ?, motion_sha256 = ?, seq = ?, updated_at = ?
+			WHERE id = ? AND deleted_at IS NULL AND motion_path IS NULL AND COALESCE(motion_length, 0) = 0`, rel, st.Size(), sum, seq, now, a.ID)
 		if err != nil {
 			return err
 		}

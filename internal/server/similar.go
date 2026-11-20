@@ -100,7 +100,8 @@ type SimilarGroup struct {
 	AssetIDs []int64 `json:"asset_ids"` // newest first
 	Keep     int64   `json:"keep"`      // the suggestion: the one to keep
 	// "same": the same picture in different files; "burst": nearly identical
-	// shots taken close together.
+	// shots taken close together; "motion": a video that is a copy of the
+	// video inside a motion photo (Takeout exports it apart too).
 	Kind string `json:"kind"`
 }
 
@@ -156,7 +157,13 @@ func (s *Server) handleSimilar(w http.ResponseWriter, r *http.Request) {
 	}
 	irows.Close()
 
-	writeJSON(w, http.StatusOK, map[string]any{"groups": similarGroups(list, ignored), "pending": pending})
+	groups := similarGroups(list, ignored)
+	motion, err := s.motionCopies(ctx, me, ignored)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"groups": append(motion, groups...), "pending": pending})
 }
 
 // lookAlike says whether two photos belong in one group, and whether as a
@@ -324,4 +331,32 @@ func (s *Server) handleSimilarIgnore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// motionCopies finds the user's videos that are byte for byte the video of
+// one of their motion photos: the photo is the one to keep.
+func (s *Server) motionCopies(ctx context.Context, userID int64, ignored map[[2]int64]bool) ([]SimilarGroup, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id, v.id FROM assets v
+		JOIN assets i ON i.user_id = v.user_id AND i.motion_sha256 = v.sha256 AND i.id != v.id
+		WHERE v.user_id = ? AND v.kind = 'video'
+			AND v.deleted_at IS NULL AND v.trashed_at IS NULL AND i.deleted_at IS NULL AND i.trashed_at IS NULL
+		ORDER BY i.taken_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var groups []SimilarGroup
+	seen := map[int64]bool{}
+	for rows.Next() {
+		var photo, video int64
+		if err := rows.Scan(&photo, &video); err != nil {
+			return nil, err
+		}
+		if seen[video] || ignored[pair(photo, video)] {
+			continue
+		}
+		seen[video] = true
+		groups = append(groups, SimilarGroup{AssetIDs: []int64{photo, video}, Keep: photo, Kind: "motion"})
+	}
+	return groups, rows.Err()
 }

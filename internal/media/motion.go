@@ -2,7 +2,9 @@ package media
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"io"
 	"os"
 	"regexp"
@@ -125,4 +127,19 @@ func mp4ToEnd(f io.ReaderAt, off, end int64) bool {
 		pos += size
 	}
 	return pos == end && moov
+}
+
+// HashSection is the SHA-256 (hex) of n bytes at off in the file at path:
+// a motion photo's video, to recognise copies of it.
+func HashSection(path string, off, n int64) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, io.NewSectionReader(f, off, n)); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

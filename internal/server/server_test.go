@@ -1587,6 +1587,28 @@ func TestMotionPhotos(t *testing.T) {
 	if !after.Motion || seqAfter <= seqBefore || stillAfter != stillSeq || unchecked != 0 {
 		t.Errorf("backfill: motion %v seq %d→%d, still seq %d→%d, unchecked %d", after.Motion, seqBefore, seqAfter, stillSeq, stillAfter, unchecked)
 	}
+
+	// The same video as a file of its own (Takeout exports it apart too) is a
+	// copy: the clean-up offers it, keeping the photo.
+	clip := e.upload(alice, "PXL_20240601_120000000.MP4", video, 201)
+	e.srv.fillMotionHashes(ctx)
+	type result struct{ Groups []SimilarGroup }
+	var groups result
+	e.json("GET", "/api/v1/similar", alice, nil, 200, &groups)
+	if len(groups.Groups) != 1 || groups.Groups[0].Kind != "motion" || groups.Groups[0].Keep != m.ID ||
+		fmt.Sprint(groups.Groups[0].AssetIDs) != fmt.Sprint([]int64{m.ID, clip.ID}) {
+		t.Fatalf("motion copy: %+v", groups.Groups)
+	}
+	var bobs result
+	e.json("GET", "/api/v1/similar", bob, nil, 200, &bobs)
+	if len(bobs.Groups) != 0 {
+		t.Errorf("bob sees alice's: %+v", bobs.Groups)
+	}
+	e.json("POST", "/api/v1/similar/ignore", alice, map[string][]int64{"ids": {m.ID, clip.ID}}, 204, nil)
+	e.json("GET", "/api/v1/similar", alice, nil, 200, &groups)
+	if len(groups.Groups) != 0 {
+		t.Errorf("after ignore: %+v", groups.Groups)
+	}
 }
 
 func TestMotionFileDeletedWithPhoto(t *testing.T) {
