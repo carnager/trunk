@@ -142,17 +142,21 @@ For people without an account. A link shows an album as it is now, or a fixed se
 
 | | |
 |---|---|
-| `POST /links` | `{"album_id"}` or `{"asset_ids": [..]}`, optional `"title"`, `"download"` (default true), `"expires_days"` → `201` link |
+| `POST /links` | `{"album_id"}` or `{"asset_ids": [..]}`, optional `"title"`, `"strip_location"` (default true), `"expires_days"` → `201` link |
 | `GET /links` | the caller's live links |
 | `DELETE /links/{token}` | revoke → `204` |
 
-A link is `{"token", "path": "/s/<token>", "title", "album_id"|"asset_ids", "download", "created_at",
-"expires_at"}`; its address is the server's address plus `path`. Only one's own photos and albums
-can be linked, and an album link shows only the owner's photos in it, not what household members
-added. The page at `/s/<token>` (no login) shows previews with date, town and caption, never
-coordinates; with `download`, originals can be downloaded, and those carry their EXIF data,
-location included. Videos play either way. Trashed photos leave the link; revoked and expired
-links show nothing.
+A link is `{"token", "path": "/s/<token>", "title", "album_id"|"asset_ids", "strip_location",
+"created_at", "expires_at"}`; its address is the server's address plus `path`. Only one's own photos
+and albums can be linked, and an album link shows only the owner's photos in it, not what household
+members added. The page at `/s/<token>` (no login) shows previews with date, town and caption, never
+coordinates, and offers every original for download (what a browser shows it can save anyway).
+
+With `strip_location`, originals go out without where they were taken: the GPS directory of JPEG
+EXIF data and GPS fields in XMP are emptied, video location boxes (`©xyz`, `loci`) and Apple's
+location key blanked, in place, so size, pixels, date and camera stay as they are and motion photos
+keep working. Formats trunk cannot clean (HEIC, for one) are replaced by their preview JPEG when they
+have a location. Trashed photos leave the link; revoked and expired links show nothing.
 
 ## Delta sync
 

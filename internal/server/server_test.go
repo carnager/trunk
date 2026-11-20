@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/carnager/trunk/internal/media"
 )
 
 type env struct {
@@ -1151,7 +1153,7 @@ func TestPublicLinks(t *testing.T) {
 	}
 	var link Link
 	e.json("POST", "/api/v1/links", alice, map[string]any{"album_id": al.ID}, 201, &link)
-	if link.Title != "Ausflug" || !link.Download || link.Path != "/s/"+link.Token || len(link.Token) < 20 {
+	if link.Title != "Ausflug" || !link.StripLocation || link.Path != "/s/"+link.Token || len(link.Token) < 20 {
 		t.Fatalf("album link: %+v", link)
 	}
 	code, body := page(link.Path)
@@ -1173,9 +1175,21 @@ func TestPublicLinks(t *testing.T) {
 	if c, _ := page(fmt.Sprintf("%s/t/%d/preview", link.Path, p1.ID)); c != 200 {
 		t.Errorf("thumb: %d", c)
 	}
-	res := e.do("GET", fmt.Sprintf("%s/f/%d?dl", link.Path, p1.ID), "", nil, nil)
-	if res.StatusCode != 200 || !strings.HasPrefix(res.Header.Get("Content-Disposition"), "attachment") {
-		t.Errorf("download: %d %q", res.StatusCode, res.Header.Get("Content-Disposition"))
+	// The original, by default without where it was taken.
+	download := func(path string) media.Info {
+		t.Helper()
+		res := e.do("GET", path, "", nil, nil)
+		if res.StatusCode != 200 || !strings.HasPrefix(res.Header.Get("Content-Disposition"), "attachment") {
+			t.Fatalf("download %s: %d %q", path, res.StatusCode, res.Header.Get("Content-Disposition"))
+		}
+		f := filepath.Join(t.TempDir(), "dl.jpg")
+		b, _ := io.ReadAll(res.Body)
+		os.WriteFile(f, b, 0o644)
+		info, _ := media.Extract(f, "dl.jpg")
+		return info
+	}
+	if info := download(fmt.Sprintf("%s/f/%d?dl", link.Path, p1.ID)); info.Lat != nil || info.Make != "Google" || info.TakenAt.IsZero() {
+		t.Errorf("cleaned original: lat %v make %q taken %v", info.Lat, info.Make, info.TakenAt)
 	}
 	for _, id := range []int64{b1.ID, p3.ID} {
 		if c, _ := page(fmt.Sprintf("%s/t/%d/small", link.Path, id)); c != 404 {
@@ -1188,18 +1202,20 @@ func TestPublicLinks(t *testing.T) {
 		t.Error("trashed photo still on the page")
 	}
 
-	// A selection without downloads.
+	// A selection that keeps the location.
 	var sel Link
-	e.json("POST", "/api/v1/links", alice, map[string]any{"asset_ids": []int64{p3.ID}, "download": false, "title": "Nur eins"}, 201, &sel)
-	if sel.Download || fmt.Sprint(sel.AssetIDs) != fmt.Sprint([]int64{p3.ID}) {
+	e.json("POST", "/api/v1/links", alice, map[string]any{"asset_ids": []int64{p1.ID, p3.ID}, "strip_location": false, "title": "Mit Ort"}, 201, &sel)
+	if sel.StripLocation || fmt.Sprint(sel.AssetIDs) != fmt.Sprint([]int64{p1.ID, p3.ID}) {
 		t.Errorf("selection link: %+v", sel)
 	}
-	if c, body := page(sel.Path); c != 200 || strings.Contains(body, "Original laden") {
-		t.Errorf("no-download page: %d", c)
+	if c, body := page(sel.Path); c != 200 || !strings.Contains(body, "Original laden") {
+		t.Errorf("selection page: %d", c)
 	}
-	if c, _ := page(fmt.Sprintf("%s/f/%d", sel.Path, p3.ID)); c != 404 {
-		t.Errorf("original without download right: %d", c)
+	if info := download(fmt.Sprintf("%s/f/%d?dl", sel.Path, p1.ID)); info.Lat == nil {
+		t.Error("location removed although the link keeps it")
 	}
+	// peek 0.11 still sends "download"; it is accepted and means nothing now.
+	e.json("POST", "/api/v1/links", alice, map[string]any{"asset_ids": []int64{p3.ID}, "download": false}, 201, nil)
 
 	// Only one's own.
 	e.json("POST", "/api/v1/links", bob, map[string]any{"album_id": al.ID}, 404, nil)
@@ -1207,7 +1223,7 @@ func TestPublicLinks(t *testing.T) {
 
 	var list struct{ Links []Link }
 	e.json("GET", "/api/v1/links", alice, nil, 200, &list)
-	if len(list.Links) != 2 {
+	if len(list.Links) != 3 {
 		t.Errorf("links: %+v", list)
 	}
 
@@ -1216,7 +1232,7 @@ func TestPublicLinks(t *testing.T) {
 	if c, body := page(sel.Path); c != 404 || !strings.Contains(body, "gilt nicht mehr") {
 		t.Errorf("revoked page: %d", c)
 	}
-	if c, _ := page(fmt.Sprintf("%s/t/%d/small", sel.Path, p3.ID)); c != 404 {
+	if c, _ := page(fmt.Sprintf("%s/t/%d/small", sel.Path, p1.ID)); c != 404 {
 		t.Errorf("revoked thumb: %d", c)
 	}
 	e.srv.db.Exec(`UPDATE links SET expires_at = 1 WHERE token = ?`, link.Token)
@@ -1224,7 +1240,7 @@ func TestPublicLinks(t *testing.T) {
 		t.Errorf("expired page: %d", c)
 	}
 	e.json("GET", "/api/v1/links", alice, nil, 200, &list)
-	if len(list.Links) != 0 {
+	if len(list.Links) != 1 || list.Links[0].Token == link.Token || list.Links[0].Token == sel.Token {
 		t.Errorf("gone links still listed: %+v", list)
 	}
 	if c, _ := page("/s/nonsense"); c != 404 {

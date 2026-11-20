@@ -212,6 +212,11 @@ CREATE TABLE link_assets (
 	PRIMARY KEY (token, asset_id)
 );
 `,
+	// 8: links always allow downloads (browsers can save what they show anyway);
+	// what they can leave out is where the photos were taken.
+	`
+ALTER TABLE links ADD COLUMN strip_location INTEGER NOT NULL DEFAULT 1;
+`,
 }
 
 func migrate(d *sql.DB) error {

@@ -11,7 +11,9 @@ import (
 	"html/template"
 	"mime"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,20 +26,21 @@ import (
 // Public links show photos to people without an account: an album as it is
 // now, or a fixed selection. Anyone with the link sees them; nothing else of
 // the library. The page is served by trunk itself, without anything loaded
-// from elsewhere. Originals carry their EXIF data, GPS included, so whether
-// they may be downloaded is a choice made per link; the page itself shows
-// previews and never coordinates.
+// from elsewhere. Originals can always be downloaded (a browser saves what
+// it shows anyway), but by default without where they were taken: the
+// location is blanked in the file on the way out, the rest left as it is.
 
 // Link is a public link as its owner sees it.
 type Link struct {
-	Token     string     `json:"token"`
-	Path      string     `json:"path"` // append to the server's address
-	Title     string     `json:"title"`
-	AlbumID   int64      `json:"album_id,omitempty"`
-	AssetIDs  []int64    `json:"asset_ids,omitempty"` // a selection link's photos
-	Download  bool       `json:"download"`
-	CreatedAt time.Time  `json:"created_at"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Token    string  `json:"token"`
+	Path     string  `json:"path"` // append to the server's address
+	Title    string  `json:"title"`
+	AlbumID  int64   `json:"album_id,omitempty"`
+	AssetIDs []int64 `json:"asset_ids,omitempty"` // a selection link's photos
+	// Originals go out without their location (GPS in EXIF, XMP, video headers).
+	StripLocation bool       `json:"strip_location"`
+	CreatedAt     time.Time  `json:"created_at"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
 }
 
 func newLinkToken() string {
@@ -47,16 +50,17 @@ func newLinkToken() string {
 }
 
 // handleCreateLink: POST /api/v1/links {"album_id"} or {"asset_ids": [..]},
-// optional "title", "download" (default true), "expires_days".
+// optional "title", "strip_location" (default true), "expires_days".
 func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	me := sessionFrom(r).UserID
 	var req struct {
-		AlbumID     int64   `json:"album_id"`
-		AssetIDs    []int64 `json:"asset_ids"`
-		Title       string  `json:"title"`
-		Download    *bool   `json:"download"`
-		ExpiresDays int     `json:"expires_days"`
+		AlbumID       int64   `json:"album_id"`
+		AssetIDs      []int64 `json:"asset_ids"`
+		Title         string  `json:"title"`
+		StripLocation *bool   `json:"strip_location"`
+		Download      *bool   `json:"download"` // from peek 0.11; downloads are always allowed now
+		ExpiresDays   int     `json:"expires_days"`
 	}
 	if !readJSON(w, r, &req) {
 		return
@@ -109,8 +113,8 @@ func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request) {
 	if req.AlbumID != 0 {
 		album = req.AlbumID
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO links (token, user_id, album_id, title, download, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, token, me, album, title, boolInt(req.Download == nil || *req.Download), now.UnixMilli(), expires); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO links (token, user_id, album_id, title, strip_location, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, token, me, album, title, boolInt(req.StripLocation == nil || *req.StripLocation), now.UnixMilli(), expires); err != nil {
 		s.internal(w, err)
 		return
 	}
@@ -135,7 +139,7 @@ func (s *Server) handleCreateLink(w http.ResponseWriter, r *http.Request) {
 
 // links lists a user's live links, or just the one with token.
 func (s *Server) links(ctx context.Context, userID int64, token string) ([]Link, error) {
-	q := `SELECT token, title, COALESCE(album_id, 0), download, created_at, expires_at FROM links
+	q := `SELECT token, title, COALESCE(album_id, 0), strip_location, created_at, expires_at FROM links
 		WHERE user_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`
 	args := []any{userID, time.Now().UnixMilli()}
 	if token != "" {
@@ -151,7 +155,7 @@ func (s *Server) links(ctx context.Context, userID int64, token string) ([]Link,
 		var l Link
 		var created int64
 		var expires sql.NullInt64
-		if err := rows.Scan(&l.Token, &l.Title, &l.AlbumID, &l.Download, &created, &expires); err != nil {
+		if err := rows.Scan(&l.Token, &l.Title, &l.AlbumID, &l.StripLocation, &created, &expires); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -221,10 +225,10 @@ func (s *Server) handleRevokeLink(w http.ResponseWriter, r *http.Request) {
 // --- public side ---
 
 type publicLink struct {
-	token, title string
-	userID       int64
-	albumID      int64
-	download     bool
+	token, title  string
+	userID        int64
+	albumID       int64
+	stripLocation bool
 }
 
 var errLinkGone = errors.New("link revoked, expired or unknown")
@@ -232,9 +236,9 @@ var errLinkGone = errors.New("link revoked, expired or unknown")
 func (s *Server) openLink(ctx context.Context, token string) (*publicLink, error) {
 	var l publicLink
 	var album sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT token, title, user_id, album_id, download FROM links
+	err := s.db.QueryRowContext(ctx, `SELECT token, title, user_id, album_id, strip_location FROM links
 		WHERE token = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
-		token, time.Now().UnixMilli()).Scan(&l.token, &l.title, &l.userID, &album, &l.download)
+		token, time.Now().UnixMilli()).Scan(&l.token, &l.title, &l.userID, &album, &l.stripLocation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errLinkGone
 	}
@@ -441,7 +445,7 @@ func (s *Server) handleSharePage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	shareTmpl.Execute(w, map[string]any{
-		"Title": l.title, "Owner": owner, "Assets": list, "Token": l.token, "Download": l.download,
+		"Title": l.title, "Owner": owner, "Assets": list, "Token": l.token,
 		"Meta": strings.Join(meta, " · "),
 	})
 }
@@ -466,15 +470,13 @@ func (s *Server) handleShareThumb(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, s.thumbPath(a.SHA256, media.Size(size)))
 }
 
-// handleShareFile serves a photo's file: videos always (to play them), photos
-// only where the link allows downloads.
+// handleShareFile serves a photo's file, to download or (videos) to play. On
+// links that leave out the location, it is blanked in what goes out; a file
+// whose format trunk cannot clean but that has a location is replaced by its
+// preview, a JPEG without metadata.
 func (s *Server) handleShareFile(w http.ResponseWriter, r *http.Request) {
 	l, a, ok := s.linkAsset(w, r)
 	if !ok {
-		return
-	}
-	if !l.download && a.Kind != "video" {
-		http.NotFound(w, r)
 		return
 	}
 	name := a.Name
@@ -483,13 +485,49 @@ func (s *Server) handleShareFile(w http.ResponseWriter, r *http.Request) {
 	}
 	disp := "inline"
 	if r.URL.Query().Has("dl") {
-		if !l.download {
-			http.NotFound(w, r)
-			return
-		}
 		disp = "attachment"
 	}
-	w.Header().Set("Content-Disposition", mime.FormatMediaType(disp, map[string]string{"filename": name}))
 	w.Header().Set("Cache-Control", "private, max-age=3600")
-	s.serveFileRaw(w, r, a.path, a.MIME)
+	if !l.stripLocation {
+		w.Header().Set("Content-Disposition", mime.FormatMediaType(disp, map[string]string{"filename": name}))
+		s.serveFileRaw(w, r, a.path, a.MIME)
+		return
+	}
+	abs := filepath.Join(s.originals, filepath.FromSlash(a.path))
+	patches, cleanable, err := media.LocationPatches(abs, a.MIME)
+	if err != nil {
+		s.log.Warn("cleaning location failed", "asset", a.ID, "err", err)
+		cleanable = false
+	}
+	if !cleanable {
+		if a.Lat != nil && a.Kind == "image" {
+			if err := s.ensureThumbs(r.Context(), a); err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			jpg := strings.TrimSuffix(name, path.Ext(name)) + ".jpg"
+			w.Header().Set("Content-Disposition", mime.FormatMediaType(disp, map[string]string{"filename": jpg}))
+			w.Header().Set("Content-Type", "image/jpeg")
+			http.ServeFile(w, r, s.thumbPath(a.SHA256, media.Preview))
+			return
+		}
+		if a.Lat != nil {
+			http.NotFound(w, r) // a video whose location cannot be removed stays home
+			return
+		}
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	w.Header().Set("Content-Disposition", mime.FormatMediaType(disp, map[string]string{"filename": name}))
+	w.Header().Set("Content-Type", a.MIME)
+	http.ServeContent(w, r, "", st.ModTime(), media.NewPatched(f, patches))
 }
