@@ -1,9 +1,12 @@
-# trunk as a system service. Install:
-#   sudo useradd --system --home-dir /var/lib/trunk --create-home trunk
-#   sudo install -m 755 trunk /usr/local/bin/trunk
-#   sudo cp contrib/trunk.service /etc/systemd/system/
+# trunk as a system service, with its data in /var/lib/trunk.
+#
+# The Arch package installs this, the trunk user and its folder. Then:
 #   sudo -u trunk trunk user add NAME -admin -data /var/lib/trunk    # in a terminal: asks for a password
 #   sudo systemctl enable --now trunk
+#
+# By hand instead: install the binary as /usr/bin/trunk, this file to /etc/systemd/system/,
+# contrib/trunk.sysusers to /etc/sysusers.d/trunk.conf and contrib/trunk.tmpfiles to
+# /etc/tmpfiles.d/trunk.conf, then systemd-sysusers && systemd-tmpfiles --create.
 #
 # To move an existing library: stop trunk, copy the whole data directory to
 # /var/lib/trunk, chown -R trunk:trunk /var/lib/trunk, start.
@@ -17,7 +20,7 @@ Wants=network-online.target
 User=trunk
 Group=trunk
 # Behind Caddy on the same machine: only reachable through it, which sets X-Forwarded-For.
-ExecStart=/usr/local/bin/trunk serve -data /var/lib/trunk -listen 127.0.0.1:8420 -trust-proxy
+ExecStart=/usr/bin/trunk serve -data /var/lib/trunk -listen 127.0.0.1:8420 -trust-proxy
 Restart=on-failure
 RestartSec=5
 

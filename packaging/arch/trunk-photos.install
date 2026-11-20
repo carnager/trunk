@@ -1,0 +1,9 @@
+post_install() {
+  cat <<'MSG'
+==> trunk runs as the user trunk, with its data in /var/lib/trunk. To start:
+      sudo -u trunk trunk user add NAME -admin -data /var/lib/trunk
+      sudo systemctl enable --now trunk
+    It listens on 127.0.0.1:8420; /usr/share/doc/trunk-photos/Caddyfile puts it behind Caddy.
+==> trunk-ai (content search, faces) needs onnxruntime; see /usr/lib/systemd/system/trunk-ai.service.
+MSG
+}

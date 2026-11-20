@@ -5,12 +5,17 @@
 Self-hosted home for your photos and videos: a small Go alternative to immich. One binary, no
 Node.js, no zoo of services.
 
-trunk is the server; [peek](../peek) is the Android app. Both share one mascot: a little
+trunk is the server; peek is the Android app. Both share one mascot: a little
 elephant, because an elephant never forgets. In peek it peeks over a photo; in trunk it sits in
 its travel chest full of pictures. *Trunk* means both: the elephant's trunk and the chest you
 keep memories in.
 
 ## Running
+
+On Arch Linux, `packaging/arch` holds a PKGBUILD (`makepkg -si` there): it installs `trunk` and
+`trunk-ai`, the systemd units, the `trunk` user and `/var/lib/trunk`, and says what to do next.
+
+From source:
 
 ```sh
 make                                   # static binary ./trunk, no cgo
@@ -113,13 +118,14 @@ Done: accounts and per-device tokens, simple and resumable (tus) upload with SHA
 deduplication, metadata (EXIF, QuickTime, file names), thumbnails and video posters, delta sync,
 favourites, trash with expiry, edits that keep the first upload, albums, Google Takeout import,
 place names and captions, albums shared within the household, photos sent directly to someone,
-public links with a small web page, daily database backups, `verify` and `reindex`.
+public links with a small web page, daily database backups, `verify` and `reindex`, a
+duplicate and look-alike finder, motion photos, date and place corrections, a web client, and
+content search and faces through `trunk-ai`.
 
 Places: photos with GPS get the nearest town, region and country, offline, from
 [GeoNames](https://www.geonames.org) data (CC BY 4.0) built into the binary
 (`go run ./tools/placesgen` rebuilds it).
 
-Next: search by content and faces.
 
 ## Brand
 
@@ -159,8 +165,14 @@ server is built.
   albums that way (`gallery/UserAlbums.kt`), so they map one to one.
 - **Auth**: one token per device, listed and revocable individually, so a lost phone can be
   locked out without logging out everything else.
-- **Later**: free-text search (CLIP embeddings) and face grouping on the server. Models run via
-  ONNX Runtime through cgo; no Python sidecar.
+- **AI**: content search (CLIP) and faces (YuNet, SFace) are computed by `trunk-ai`, a separate
+  binary with ONNX Runtime through cgo; trunk itself only stores and compares vectors and stays
+  static. No Python sidecar.
 
 peek keeps working without a server: everything above is an addition to the local gallery, not
 a replacement.
+
+## License
+
+GPL-3.0-or-later, see `LICENSE`. Place data from [GeoNames](https://www.geonames.org) (CC BY 4.0);
+fonts under the SIL Open Font License (`internal/server/web/fonts/OFL.txt`).

@@ -1,0 +1,60 @@
+# Maintainer: Rasi <rasi@xssn.at>
+
+pkgname=trunk-photos
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Self-hosted home for your photos and videos, with trunk-ai for content search and faces'
+arch=('x86_64' 'aarch64')
+url='https://github.com/carnager/trunk'
+license=('GPL-3.0-or-later')
+depends=('glibc')
+makedepends=('go>=2:1.27')
+optdepends=('onnxruntime: for trunk-ai (content search and faces)'
+            'caddy: HTTPS in front of trunk (see Caddyfile in the docs)')
+# /usr/bin/trunk is also the Rust WASM bundler's name.
+conflicts=('trunk')
+backup=('etc/trunk/trunk-ai.env')
+install=trunk-photos.install
+source=("trunk-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "trunk-$pkgver"
+  export GOPATH="$srcdir/gopath"
+  go mod download
+  (cd ai && go mod download)
+}
+
+build() {
+  cd "trunk-$pkgver"
+  export GOPATH="$srcdir/gopath"
+  export GOFLAGS='-buildmode=pie -trimpath -mod=readonly -modcacherw'
+  # trunk: static, no cgo; HEIC/AVIF decode through the embedded WASM build.
+  CGO_ENABLED=0 go build -tags nodynamic -ldflags "-s -w -X main.version=v$pkgver" -o trunk ./cmd/trunk
+  # trunk-ai: cgo, loads libonnxruntime.so when it runs.
+  export CGO_CPPFLAGS="$CPPFLAGS" CGO_CFLAGS="$CFLAGS" CGO_CXXFLAGS="$CXXFLAGS" CGO_LDFLAGS="$LDFLAGS"
+  (cd ai && CGO_ENABLED=1 go build -ldflags "-linkmode=external" -o ../trunk-ai .)
+}
+
+check() {
+  cd "trunk-$pkgver"
+  export GOPATH="$srcdir/gopath"
+  CGO_ENABLED=0 go test -tags nodynamic ./...
+}
+
+package() {
+  cd "trunk-$pkgver"
+  install -Dm755 trunk "$pkgdir/usr/bin/trunk"
+  install -Dm755 trunk-ai "$pkgdir/usr/bin/trunk-ai"
+  install -Dm644 contrib/trunk.service "$pkgdir/usr/lib/systemd/system/trunk.service"
+  install -Dm644 contrib/trunk-ai.service "$pkgdir/usr/lib/systemd/system/trunk-ai.service"
+  install -Dm644 contrib/trunk-ai.timer "$pkgdir/usr/lib/systemd/system/trunk-ai.timer"
+  install -Dm644 contrib/trunk.sysusers "$pkgdir/usr/lib/sysusers.d/trunk.conf"
+  install -Dm644 contrib/trunk.tmpfiles "$pkgdir/usr/lib/tmpfiles.d/trunk.conf"
+  install -Dm644 contrib/trunk-ai.env "$pkgdir/etc/trunk/trunk-ai.env"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 ai/README.md "$pkgdir/usr/share/doc/$pkgname/trunk-ai.md"
+  install -Dm644 docs/api.md "$pkgdir/usr/share/doc/$pkgname/api.md"
+  install -Dm644 contrib/Caddyfile "$pkgdir/usr/share/doc/$pkgname/Caddyfile"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
