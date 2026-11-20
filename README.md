@@ -64,6 +64,12 @@ The originals tree is the source of truth and stays readable without trunk. Back
 
 The API is described in [docs/api.md](docs/api.md).
 
+## Content search
+
+Searching by what is in the photos ("Hund am Strand") needs vectors that a model computes, and
+trunk runs no model: [`ai/`](ai/README.md) holds `trunk-ai`, which does that on a desktop whenever
+convenient and sends the results to trunk. Without it, everything else works as before.
+
 ## Running it for real
 
 `contrib/trunk.service` runs trunk as a hardened systemd service under its own user, with the data
