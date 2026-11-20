@@ -1,0 +1,19 @@
+# trunk as a user service, with its data in ~/.local/share/trunk. The Arch package installs it.
+#   systemctl --user enable --now trunk
+#   trunk user add NAME -admin -data ~/.local/share/trunk    # asks for a password
+#   loginctl enable-linger $USER                             # keeps it running when you log out
+# By hand: copy to ~/.config/systemd/user/trunk.service.
+# A different address or data directory: systemctl --user edit trunk
+
+[Unit]
+Description=trunk photo server
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/trunk serve -data %h/.local/share/trunk -listen 127.0.0.1:8420
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

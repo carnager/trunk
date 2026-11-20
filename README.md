@@ -22,12 +22,20 @@ Your files stay plain files in `originals/<user>/<year>/<month>/`, readable with
 
 ## Install
 
-Arch Linux: `packaging/arch` has a PKGBUILD. It installs `trunk`, `trunk-ai`, the systemd units
-and a `trunk` user with its data in `/var/lib/trunk`.
+Arch Linux: `packaging/arch` has a PKGBUILD. It installs `trunk`, `trunk-ai`, system and user units
+for both, and a `trunk` user with its data in `/var/lib/trunk`.
 
 ```sh
 sudo -u trunk trunk user add alice -admin -data /var/lib/trunk
 sudo systemctl enable --now trunk
+```
+
+Or as a user service, with the data in `~/.local/share/trunk`:
+
+```sh
+systemctl --user enable --now trunk
+trunk user add alice -admin -data ~/.local/share/trunk
+loginctl enable-linger $USER    # keep it running when you log out
 ```
 
 From source (Go 1.27):

@@ -1,0 +1,22 @@
+# trunk-ai as a user service, run hourly by trunk-ai.timer. The Arch package installs both.
+# Once, in a terminal (asks for the password, remembers the login, downloads ~1 GB of models):
+#   trunk-ai index -server http://127.0.0.1:8420 -user ADMIN
+# then put TRUNK_USER=ADMIN (and TRUNK_SERVER=..., if trunk is elsewhere) in
+# ~/.config/trunk-ai/env and: systemctl --user enable --now trunk-ai.timer
+#
+# Needs the ONNX Runtime library (Arch: onnxruntime-cpu).
+
+[Unit]
+Description=trunk-ai: content search vectors for new photos
+After=trunk.service
+
+[Service]
+Type=oneshot
+Environment=TRUNK_SERVER=http://127.0.0.1:8420
+EnvironmentFile=-%h/.config/trunk-ai/env
+ExecStart=/usr/bin/trunk-ai index -batch 16 -threads 2
+
+# In the background: low priority, at most two cores.
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=200%

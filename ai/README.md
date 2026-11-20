@@ -27,8 +27,9 @@ It needs an admin account, because it indexes the whole household. It asks for t
 once and remembers the login in `~/.config/trunk-ai`. The models are downloaded on first use to
 `~/.cache/trunk-ai`, about 1 GB, pinned by checksum. `index` only does what's missing.
 
-To run it next to trunk: `contrib/trunk-ai.service` and `.timer` run it hourly, at low priority
-and on at most two cores. Setup steps are in the service file.
+To run it regularly: `contrib/trunk-ai.service` (system) or `contrib/trunk-ai.user.service`
+(user), with `trunk-ai.timer`, runs it hourly at low priority and on at most two cores. Setup
+steps are in the service files.
 
 ## Models
 
