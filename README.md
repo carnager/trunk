@@ -61,6 +61,7 @@ originals/     your photos and videos
 thumbs/        thumbnails, rebuilt when missing
 backups/       a copy of trunk.db every day, the last 7
 uploads/       unfinished uploads
+ai/            the search text model the app downloads, uploaded by trunk-ai
 ```
 
 Back up `originals/` and `backups/`. If you lose the database: copy the newest backup to
