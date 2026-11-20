@@ -1,0 +1,413 @@
+package server
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"mime"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/carnager/trunk/internal/db"
+)
+
+// Asset is one photo or video as the API presents it. A deleted asset is sent
+// as a tombstone with only ID, Seq and Deleted set.
+type Asset struct {
+	ID      int64  `json:"id"`
+	Seq     int64  `json:"seq"`
+	Deleted bool   `json:"deleted,omitempty"`
+	SHA256  string `json:"sha256,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Kind    string `json:"kind,omitempty"`
+	MIME    string `json:"mime,omitempty"`
+	Size    int64  `json:"size,omitempty"`
+
+	TakenAt   *time.Time `json:"taken_at,omitempty"`   // UTC instant
+	TZOffset  *int       `json:"tz_offset,omitempty"`  // minutes east of UTC, absent if unknown
+	LocalTime string     `json:"local_time,omitempty"` // wall clock where it was taken
+
+	Width       int      `json:"width,omitempty"` // display size, orientation applied
+	Height      int      `json:"height,omitempty"`
+	Orientation int      `json:"orientation,omitempty"`
+	DurationMS  int64    `json:"duration_ms,omitempty"`
+	Lat         *float64 `json:"lat,omitempty"`
+	Lon         *float64 `json:"lon,omitempty"`
+	Alt         *float64 `json:"alt,omitempty"`
+	Make        string   `json:"make,omitempty"`
+	Model       string   `json:"model,omitempty"`
+	Lens        string   `json:"lens,omitempty"`
+	FNumber     float64  `json:"f_number,omitempty"`
+	Exposure    float64  `json:"exposure,omitempty"` // seconds
+	ISO         int      `json:"iso,omitempty"`
+	FocalLength float64  `json:"focal_length,omitempty"`
+
+	Favorite       bool       `json:"favorite"`
+	TrashedAt      *time.Time `json:"trashed_at,omitempty"`
+	TrashExpiresAt *time.Time `json:"trash_expires_at,omitempty"`
+	CreatedAt      *time.Time `json:"created_at,omitempty"`
+	UpdatedAt      *time.Time `json:"updated_at,omitempty"`
+
+	userID int64
+	path   string
+}
+
+const assetCols = `id, user_id, seq, sha256, path, orig_name, kind, mime, size, taken_at, tz_offset,
+	width, height, orientation, duration_ms, lat, lon, alt, make, model, lens, f_number, exposure, iso,
+	focal_length, favorite, trashed_at, deleted_at, created_at, updated_at`
+
+type scanner interface{ Scan(...any) error }
+
+func (s *Server) scanAsset(sc scanner) (*Asset, error) {
+	var a Asset
+	var (
+		taken, created, updated          int64
+		tz, w, h, orient, dur, iso       sql.NullInt64
+		lat, lon, alt, fnum, expo, focal sql.NullFloat64
+		mk, model, lens                  sql.NullString
+		fav                              int
+		trashed, deleted                 sql.NullInt64
+	)
+	err := sc.Scan(&a.ID, &a.userID, &a.Seq, &a.SHA256, &a.path, &a.Name, &a.Kind, &a.MIME, &a.Size,
+		&taken, &tz, &w, &h, &orient, &dur, &lat, &lon, &alt, &mk, &model, &lens, &fnum, &expo, &iso,
+		&focal, &fav, &trashed, &deleted, &created, &updated)
+	if err != nil {
+		return nil, err
+	}
+	if deleted.Valid {
+		return &Asset{ID: a.ID, Seq: a.Seq, Deleted: true, userID: a.userID}, nil
+	}
+	t := time.UnixMilli(taken).UTC()
+	a.TakenAt = &t
+	local := t
+	if tz.Valid {
+		o := int(tz.Int64)
+		a.TZOffset = &o
+		local = t.Add(time.Duration(o) * time.Minute)
+	}
+	a.LocalTime = local.Format("2006-01-02T15:04:05")
+	a.Width, a.Height, a.Orientation = int(w.Int64), int(h.Int64), int(orient.Int64)
+	a.DurationMS, a.ISO = dur.Int64, int(iso.Int64)
+	a.Lat, a.Lon, a.Alt = nullF(lat), nullF(lon), nullF(alt)
+	a.Make, a.Model, a.Lens = mk.String, model.String, lens.String
+	a.FNumber, a.Exposure, a.FocalLength = fnum.Float64, expo.Float64, focal.Float64
+	a.Favorite = fav == 1
+	if trashed.Valid {
+		tt := time.UnixMilli(trashed.Int64).UTC()
+		exp := tt.AddDate(0, 0, s.cfg.TrashDays)
+		a.TrashedAt, a.TrashExpiresAt = &tt, &exp
+	}
+	c, u := time.UnixMilli(created).UTC(), time.UnixMilli(updated).UTC()
+	a.CreatedAt, a.UpdatedAt = &c, &u
+	return &a, nil
+}
+
+func nullF(v sql.NullFloat64) *float64 {
+	if !v.Valid {
+		return nil
+	}
+	return &v.Float64
+}
+
+var errNotFound = errors.New("not found")
+
+// getAsset loads a live (not deleted) asset owned by userID.
+func (s *Server) getAsset(ctx context.Context, userID, id int64) (*Asset, error) {
+	a, err := s.scanAsset(s.db.QueryRowContext(ctx,
+		`SELECT `+assetCols+` FROM assets WHERE id = ? AND user_id = ?`, id, userID))
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && a.Deleted) {
+		return nil, errNotFound
+	}
+	return a, err
+}
+
+func (s *Server) assetFromPath(w http.ResponseWriter, r *http.Request) (*Asset, bool) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return nil, false
+	}
+	a, err := s.getAsset(r.Context(), sessionFrom(r).UserID, id)
+	if errors.Is(err, errNotFound) {
+		httpError(w, http.StatusNotFound, "no such asset")
+		return nil, false
+	} else if err != nil {
+		s.internal(w, err)
+		return nil, false
+	}
+	return a, true
+}
+
+// handleChanges is the delta sync feed: every asset whose seq is greater than
+// `since`, oldest change first. Clients store `cursor` and pass it as `since`
+// next time; while `more` is true there is another page waiting.
+func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r)
+	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	// Read the global seq before querying: any change that commits later gets
+	// a larger seq, so handing this out as the cursor can never skip one.
+	var head int64
+	if err := s.db.QueryRowContext(r.Context(), `SELECT value FROM meta WHERE key = 'seq'`).Scan(&head); err != nil {
+		s.internal(w, err)
+		return
+	}
+	q := `SELECT ` + assetCols + ` FROM assets WHERE user_id = ? AND seq > ?`
+	if since == 0 {
+		q += ` AND deleted_at IS NULL` // a fresh client has nothing to delete
+	}
+	q += ` ORDER BY seq LIMIT ?`
+	rows, err := s.db.QueryContext(r.Context(), q, sess.UserID, since, limit+1)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	defer rows.Close()
+	list := []*Asset{}
+	for rows.Next() {
+		a, err := s.scanAsset(rows)
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		list = append(list, a)
+	}
+	if err := rows.Err(); err != nil {
+		s.internal(w, err)
+		return
+	}
+	more := len(list) > limit
+	if more {
+		list = list[:limit]
+	}
+	cursor := since
+	if len(list) > 0 {
+		cursor = list[len(list)-1].Seq
+	} else if head > since {
+		cursor = head // nothing new for this user; skip past other users' changes
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assets": list, "cursor": cursor, "more": more})
+}
+
+var reSHA = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// handleCheck tells a client which of its files the server already has, so it
+// can skip uploading them. Trashed assets count as present.
+func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r)
+	var req struct {
+		SHA256 []string `json:"sha256"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if len(req.SHA256) > 5000 {
+		httpError(w, http.StatusBadRequest, "at most 5000 hashes per request")
+		return
+	}
+	found := map[string]int64{}
+	for _, h := range req.SHA256 {
+		h = strings.ToLower(h)
+		if !reSHA.MatchString(h) {
+			httpError(w, http.StatusBadRequest, "bad sha256: "+h)
+			return
+		}
+		var id int64
+		err := s.db.QueryRowContext(r.Context(),
+			`SELECT id FROM assets WHERE user_id = ? AND sha256 = ? AND deleted_at IS NULL`, sess.UserID, h).Scan(&id)
+		if err == nil {
+			found[h] = id
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			s.internal(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"existing": found})
+}
+
+func (s *Server) handleGetAsset(w http.ResponseWriter, r *http.Request) {
+	if a, ok := s.assetFromPath(w, r); ok {
+		writeJSON(w, http.StatusOK, a)
+	}
+}
+
+func (s *Server) handlePatchAsset(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.assetFromPath(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Favorite *bool `json:"favorite"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Favorite != nil && *req.Favorite != a.Favorite {
+		err := s.mutate(r.Context(), a.userID, []int64{a.ID}, `favorite = ?`, boolInt(*req.Favorite))
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		a, _ = s.getAsset(r.Context(), a.userID, a.ID)
+	}
+	writeJSON(w, http.StatusOK, a)
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// mutate applies `set` to the given live assets of userID, stamping each with
+// a new seq so the change reaches every device.
+func (s *Server) mutate(ctx context.Context, userID int64, ids []int64, set string, args ...any) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UnixMilli()
+	for _, id := range ids {
+		seq, err := db.NextSeq(ctx, tx)
+		if err != nil {
+			return err
+		}
+		a := append(append([]any{}, args...), seq, now, id, userID)
+		if _, err := tx.ExecContext(ctx, `UPDATE assets SET `+set+`, seq = ?, updated_at = ?
+			WHERE id = ? AND user_id = ? AND deleted_at IS NULL`, a...); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func readIDs(w http.ResponseWriter, r *http.Request) ([]int64, bool) {
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	if !readJSON(w, r, &req) {
+		return nil, false
+	}
+	if len(req.IDs) == 0 || len(req.IDs) > 5000 {
+		httpError(w, http.StatusBadRequest, "need 1 to 5000 ids")
+		return nil, false
+	}
+	return req.IDs, true
+}
+
+func (s *Server) handleTrash(w http.ResponseWriter, r *http.Request) {
+	ids, ok := readIDs(w, r)
+	if !ok {
+		return
+	}
+	err := s.mutate(r.Context(), sessionFrom(r).UserID, ids, `trashed_at = COALESCE(trashed_at, ?)`, time.Now().UnixMilli())
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
+	ids, ok := readIDs(w, r)
+	if !ok {
+		return
+	}
+	if err := s.mutate(r.Context(), sessionFrom(r).UserID, ids, `trashed_at = NULL`); err != nil {
+		s.internal(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDelete removes assets for good. Only trashed assets can be deleted,
+// so one stray request cannot wipe photos without passing through the trash.
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	ids, ok := readIDs(w, r)
+	if !ok {
+		return
+	}
+	n, err := s.purge(r.Context(), sessionFrom(r).UserID, ids)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": n})
+}
+
+// purge deletes trashed assets: the row becomes a tombstone and the original
+// and its thumbnails are removed from disk.
+func (s *Server) purge(ctx context.Context, userID int64, ids []int64) (int, error) {
+	n := 0
+	for _, id := range ids {
+		var rel, sha string
+		err := s.db.QueryRowContext(ctx, `SELECT path, sha256 FROM assets
+			WHERE id = ? AND user_id = ? AND trashed_at IS NOT NULL AND deleted_at IS NULL`, id, userID).Scan(&rel, &sha)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		} else if err != nil {
+			return n, err
+		}
+		if err := s.tombstone(ctx, id); err != nil {
+			return n, err
+		}
+		if err := os.Remove(filepath.Join(s.originals, filepath.FromSlash(rel))); err != nil && !os.IsNotExist(err) {
+			s.log.Warn("removing original", "path", rel, "err", err)
+		}
+		s.removeThumbsIfUnused(ctx, sha)
+		n++
+	}
+	return n, nil
+}
+
+func (s *Server) tombstone(ctx context.Context, id int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	seq, err := db.NextSeq(ctx, tx)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	if _, err := tx.ExecContext(ctx, `UPDATE assets SET deleted_at = ?, path = '', seq = ?, updated_at = ?
+		WHERE id = ?`, now, seq, now, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Server) handleOriginal(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.assetFromPath(w, r)
+	if !ok {
+		return
+	}
+	f, err := os.Open(filepath.Join(s.originals, filepath.FromSlash(a.path)))
+	if err != nil {
+		s.internal(w, fmt.Errorf("asset %d: %w", a.ID, err))
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", a.MIME)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": a.Name}))
+	w.Header().Set("ETag", `"`+a.SHA256+`"`)
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	// ServeContent handles Range, so videos stream and seek.
+	http.ServeContent(w, r, "", st.ModTime(), f)
+}

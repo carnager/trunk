@@ -10,6 +10,43 @@ elephant, because an elephant never forgets. In peek it peeks over a photo; in t
 its travel chest full of pictures. *Trunk* means both: the elephant's trunk and the chest you
 keep memories in.
 
+## Running
+
+```sh
+make                                   # static binary ./trunk, no cgo
+./trunk user add alice -admin          # asks for a password
+./trunk serve -data /srv/trunk -listen :8420
+```
+
+trunk is one file. Optional: `ffmpeg`/`ffprobe` on `PATH` for video poster frames, duration and
+location; without them videos are still stored and served. HEIC and AVIF decode through
+built-in WebAssembly, so no system libraries are needed. Put a reverse proxy in front for TLS
+and pass `-trust-proxy`.
+
+Everything lives in the data directory:
+
+```
+data/
+  trunk.db                     SQLite index (users, devices, assets, sync sequence)
+  originals/alice/2024/06/…    your files, as uploaded, named as on the phone
+  thumbs/                      JPEG renditions, rebuildable
+  uploads/                     unfinished uploads
+```
+
+The originals tree is the source of truth and stays readable without trunk. Back up
+`originals/` and `trunk.db`; thumbnails can be regenerated.
+
+The API is described in [docs/api.md](docs/api.md).
+
+## Status
+
+Done: accounts and per-device tokens, simple and resumable (tus) upload with SHA-256
+deduplication, metadata (EXIF, QuickTime, file names), thumbnails and video posters, delta sync,
+favourites, trash with expiry.
+
+Next: albums, Google Takeout import (`trunk import takeout`), then a small web UI and share
+links, then search and faces.
+
 ## Brand
 
 | | peek (app) | trunk (server) |
