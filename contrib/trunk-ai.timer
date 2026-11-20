@@ -1,0 +1,11 @@
+# Runs trunk-ai.service hourly; it only works when there are new photos.
+[Unit]
+Description=Hourly content search vectors for new photos
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

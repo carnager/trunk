@@ -24,6 +24,9 @@ cd ai && go build -o trunk-ai .
 ./trunk-ai search -server https://photos.example.org -user alice "Schnee im Wald"
 ```
 
+On the machine trunk runs on, `contrib/trunk-ai.service` and `.timer` run it hourly at low
+priority (at most two cores) after new photos; instructions are in the service file.
+
 The models (pinned by checksum) are downloaded from Hugging Face on first use into
 `~/.cache/trunk-ai`; the login is remembered in `~/.config/trunk-ai`. Run `index` from a timer or
 by hand; it only does what is missing.
