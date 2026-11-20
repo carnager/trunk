@@ -30,6 +30,16 @@ type ingestReq struct {
 	SHA256   string     // computed hash
 	Source   string     // optional: hash of the client's file before it shrank it
 	Mtime    *time.Time // client-side file time, last resort for taken_at
+	Hints    *Hints     // what another source (an import) knows about the file
+}
+
+// Hints fill in what a file lacks. They never override the file's own
+// metadata, which is usually more precise (a local time, a GPS fix).
+type Hints struct {
+	TakenAt  time.Time // an exact instant
+	Lat, Lon *float64
+	Alt      *float64
+	Favorite bool
 }
 
 var errHashMismatch = errors.New("sha256 does not match the uploaded data")
@@ -54,6 +64,9 @@ func (s *Server) ingest(ctx context.Context, q ingestReq) (a *Asset, created boo
 	st, err := os.Stat(q.TmpPath)
 	if err != nil {
 		return nil, false, err
+	}
+	if h := q.Hints; h != nil {
+		applyHints(&info, h)
 	}
 	taken := info.TakenAt
 	if taken.IsZero() && q.Mtime != nil {
@@ -88,7 +101,7 @@ func (s *Server) ingest(ctx context.Context, q ingestReq) (a *Asset, created boo
 	abs := filepath.Join(s.originals, filepath.FromSlash(rel))
 	os.Chtimes(abs, taken, taken) // file managers then sort by capture time too
 
-	id, err := s.insertAsset(ctx, q, rel, info, st.Size(), taken)
+	id, err := s.insertAsset(ctx, q, rel, info, st.Size(), taken, q.Hints != nil && q.Hints.Favorite)
 	if err != nil {
 		os.Rename(abs, q.TmpPath) // put it back so the deferred cleanup removes it
 		return nil, false, err
@@ -101,6 +114,30 @@ func (s *Server) ingest(ctx context.Context, q ingestReq) (a *Asset, created boo
 	s.log.Info("asset added", "user", q.UserName, "id", id, "path", rel)
 	a, err = s.getAsset(ctx, q.UserID, id)
 	return a, true, err
+}
+
+func applyHints(in *media.Info, h *Hints) {
+	switch {
+	case h.TakenAt.IsZero(), in.TakenFrom == "video":
+	case in.TakenFrom == "exif":
+		// Old cameras write local time without an offset; the instant gives it.
+		if in.TZOffset == nil {
+			if off := media.OffsetFrom(in.TakenAt, h.TakenAt, 0); off != nil {
+				in.TZOffset = off
+				in.TakenAt = in.TakenAt.Add(-time.Duration(*off) * time.Minute)
+			}
+		}
+	case in.TakenFrom == "filename":
+		// The name has the local wall clock, the hint the instant: together
+		// they give the offset, and the instant is exact either way.
+		in.TZOffset = media.OffsetFrom(in.TakenAt, h.TakenAt, in.DurationMS)
+		in.TakenAt = h.TakenAt
+	default:
+		in.TakenAt = h.TakenAt
+	}
+	if in.Lat == nil && h.Lat != nil && h.Lon != nil {
+		in.Lat, in.Lon, in.Alt = h.Lat, h.Lon, h.Alt
+	}
 }
 
 // existing returns the asset the upload duplicates, by its own hash or its
@@ -144,20 +181,20 @@ func (s *Server) place(tmp, dir, name string) (string, error) {
 		}
 		rel := path.Join(dir, cand)
 		abs := filepath.Join(s.originals, filepath.FromSlash(rel))
-		if _, err := os.Lstat(abs); err == nil {
+		// A hard link fails if the name is taken, so two processes (the server
+		// and an import) can never overwrite each other's file.
+		if err := os.Link(tmp, abs); errors.Is(err, os.ErrExist) {
 			continue
-		} else if !os.IsNotExist(err) {
+		} else if err != nil {
 			return "", err
 		}
-		if err := os.Rename(tmp, abs); err != nil {
-			return "", err
-		}
+		os.Remove(tmp)
 		return rel, nil
 	}
 	return "", fmt.Errorf("no free file name for %s in %s", name, dir)
 }
 
-func (s *Server) insertAsset(ctx context.Context, q ingestReq, rel string, in media.Info, size int64, taken time.Time) (int64, error) {
+func (s *Server) insertAsset(ctx context.Context, q ingestReq, rel string, in media.Info, size int64, taken time.Time, fav bool) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -170,12 +207,12 @@ func (s *Server) insertAsset(ctx context.Context, q ingestReq, rel string, in me
 	now := time.Now().UnixMilli()
 	res, err := tx.ExecContext(ctx, `INSERT INTO assets (user_id, seq, sha256, path, orig_name, kind, mime, size,
 		taken_at, tz_offset, width, height, orientation, duration_ms, lat, lon, alt, make, model, lens,
-		f_number, exposure, iso, focal_length, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		f_number, exposure, iso, focal_length, favorite, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		q.UserID, seq, q.SHA256, rel, q.Name, in.Kind, in.MIME, size,
 		taken.UnixMilli(), in.TZOffset, nz(in.Width), nz(in.Height), nz(in.Orientation), nz(in.DurationMS),
 		in.Lat, in.Lon, in.Alt, ns(in.Make), ns(in.Model), ns(in.Lens),
-		nzf(in.FNumber), nzf(in.Exposure), nz(in.ISO), nzf(in.FocalLength), now, now)
+		nzf(in.FNumber), nzf(in.Exposure), nz(in.ISO), nzf(in.FocalLength), boolInt(fav), now, now)
 	if err != nil {
 		return 0, err
 	}

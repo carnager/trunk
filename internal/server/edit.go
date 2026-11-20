@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path"
@@ -48,35 +50,51 @@ func (s *Server) handlePutEdit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fresh, err := s.saveEdit(r.Context(), a, tmp, sum)
+	var conflict errEditConflict
+	switch {
+	case errors.As(err, &conflict):
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "this file is already another asset", "asset_id": conflict.id})
+	case errors.Is(err, errNotPhoto):
+		httpError(w, http.StatusUnsupportedMediaType, "not a photo")
+	case err != nil:
+		s.internal(w, err)
+	default:
+		writeJSON(w, http.StatusOK, fresh)
+	}
+}
+
+type errEditConflict struct{ id int64 }
+
+func (e errEditConflict) Error() string { return fmt.Sprintf("file is already asset %d", e.id) }
+
+var errNotPhoto = errors.New("not a photo")
+
+// saveEdit makes the file at tmp (hash sum) the current version of a. The
+// file is moved into the library; on error the caller removes it.
+func (s *Server) saveEdit(ctx context.Context, a *Asset, tmp, sum string) (*Asset, error) {
 	switch {
 	case sum == a.SHA256:
-		writeJSON(w, http.StatusOK, a) // nothing changed
-		return
+		return a, nil // nothing changed
 	case a.EditedAt != nil && sum == a.OriginalSHA256:
-		s.revert(w, r, a) // edited back to exactly the original
-		return
+		return s.revertEdit(ctx, a) // edited back to exactly the original
 	}
-	if id, ok, err := s.findBySHA(r.Context(), a.userID, sum); err != nil {
-		s.internal(w, err)
-		return
+	if id, ok, err := s.findBySHA(ctx, a.userID, sum); err != nil {
+		return nil, err
 	} else if ok && id != a.ID {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": "this file is already another asset", "asset_id": id})
-		return
+		return nil, errEditConflict{id}
 	}
 
 	info, err := media.Extract(tmp, a.Name)
 	if errors.Is(err, media.ErrUnsupported) || (err == nil && info.Kind != "image") {
-		httpError(w, http.StatusUnsupportedMediaType, "not a photo")
-		return
+		return nil, errNotPhoto
 	} else if err != nil {
-		s.internal(w, err)
-		return
+		return nil, err
 	}
 	st, err := os.Stat(tmp)
 	if err != nil {
-		s.internal(w, err)
-		return
+		return nil, err
 	}
 
 	s.ingestMu.Lock()
@@ -93,25 +111,23 @@ func (s *Server) handlePutEdit(w http.ResponseWriter, r *http.Request) {
 	}
 	rel, err := s.place(tmp, path.Dir(first), name)
 	if err != nil {
-		s.internal(w, err)
-		return
+		return nil, err
 	}
-	if err := s.applyEdit(r.Context(), a, rel, sum, st.Size(), info); err != nil {
+	if err := s.applyEdit(ctx, a, rel, sum, st.Size(), info); err != nil {
 		os.Remove(filepath.Join(s.originals, filepath.FromSlash(rel)))
-		s.internal(w, err)
-		return
+		return nil, err
 	}
 	if a.EditedAt != nil {
 		// The previous edit is replaced, not kept: only the first upload is sacred.
 		os.Remove(filepath.Join(s.originals, filepath.FromSlash(a.path)))
 	}
-	s.removeThumbsIfUnused(r.Context(), a.SHA256)
+	s.removeThumbsIfUnused(ctx, a.SHA256)
 	select {
 	case s.thumbQ <- a.ID:
 	default:
 	}
 	s.log.Info("asset edited", "id", a.ID, "path", rel)
-	s.respondAsset(w, r, a)
+	return s.getAsset(ctx, a.userID, a.ID)
 }
 
 func (s *Server) applyEdit(ctx context.Context, a *Asset, rel, sha string, size int64, in media.Info) error {
@@ -167,18 +183,16 @@ func (s *Server) handleDeleteEdit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) revert(w http.ResponseWriter, r *http.Request, a *Asset) {
-	ctx := r.Context()
-	err := func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		seq, err := db.NextSeq(ctx, tx)
-		if err != nil {
-			return err
-		}
-		now := time.Now().UnixMilli()
+	fresh, err := s.revertEdit(r.Context(), a)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, fresh)
+}
+
+func (s *Server) revertEdit(ctx context.Context, a *Asset) (*Asset, error) {
+	err := s.inTx(ctx, func(tx *sql.Tx, seq, now int64) error {
 		if _, err := tx.ExecContext(ctx, `UPDATE assets SET
 			path = orig_path, sha256 = orig_sha256, size = orig_size, mime = orig_mime,
 			width = orig_width, height = orig_height, orientation = orig_orientation,
@@ -188,19 +202,16 @@ func (s *Server) revert(w http.ResponseWriter, r *http.Request, a *Asset) {
 			WHERE id = ? AND edited_at IS NOT NULL`, seq, now, a.ID); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM asset_hashes WHERE asset_id = ? AND kind = 'edit'`, a.ID); err != nil {
-			return err
-		}
-		return tx.Commit()
-	}()
+		_, err := tx.ExecContext(ctx, `DELETE FROM asset_hashes WHERE asset_id = ? AND kind = 'edit'`, a.ID)
+		return err
+	})
 	if err != nil {
-		s.internal(w, err)
-		return
+		return nil, err
 	}
 	os.Remove(filepath.Join(s.originals, filepath.FromSlash(a.path)))
 	s.removeThumbsIfUnused(ctx, a.SHA256)
 	s.log.Info("edit reverted", "id", a.ID)
-	s.respondAsset(w, r, a)
+	return s.getAsset(ctx, a.userID, a.ID)
 }
 
 func (s *Server) respondAsset(w http.ResponseWriter, r *http.Request, a *Asset) {

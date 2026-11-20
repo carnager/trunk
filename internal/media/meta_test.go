@@ -33,18 +33,18 @@ func TestTimeFromFilename(t *testing.T) {
 func TestOffsetFrom(t *testing.T) {
 	utc := time.Date(2023, 6, 10, 12, 4, 35, 0, time.UTC)
 	local := time.Date(2023, 6, 10, 14, 4, 18, 0, time.UTC) // wall clock, start of a 32 s clip
-	if o := offsetFrom(local, utc, 32777); o == nil || *o != 120 {
+	if o := OffsetFrom(local, utc, 32777); o == nil || *o != 120 {
 		t.Errorf("CEST clip: %v", o)
 	}
 	// India, +05:30.
-	if o := offsetFrom(utc.Add(5*time.Hour+30*time.Minute), utc, 0); o == nil || *o != 330 {
+	if o := OffsetFrom(utc.Add(5*time.Hour+30*time.Minute), utc, 0); o == nil || *o != 330 {
 		t.Errorf("IST: %v", o)
 	}
 	// Name and timestamp disagree by more than slack: no guess.
-	if o := offsetFrom(utc.Add(2*time.Hour+7*time.Minute), utc, 1000); o != nil {
+	if o := OffsetFrom(utc.Add(2*time.Hour+7*time.Minute), utc, 1000); o != nil {
 		t.Errorf("unrelated times gave %d", *o)
 	}
-	if o := offsetFrom(utc.Add(20*time.Hour), utc, 0); o != nil {
+	if o := OffsetFrom(utc.Add(20*time.Hour), utc, 0); o != nil {
 		t.Errorf("20h apart gave %d", *o)
 	}
 }

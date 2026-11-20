@@ -37,6 +37,7 @@ type Info struct {
 	Kind        string // "image" or "video"
 	MIME        string
 	TakenAt     time.Time // zero if unknown
+	TakenFrom   string    // where TakenAt came from: exif, video, filename, or "" if unknown
 	TZOffset    *int      // minutes east of UTC; nil if unknown
 	Width       int
 	Height      int
@@ -116,20 +117,20 @@ func Extract(path, name string) (Info, error) {
 	}
 	if fn, ok := TimeFromFilename(filepath.Base(name)); ok {
 		if in.TakenAt.IsZero() {
-			in.TakenAt = fn
+			in.TakenAt, in.TakenFrom = fn, "filename"
 		} else if in.TZOffset == nil {
-			in.TZOffset = offsetFrom(fn, in.TakenAt, in.DurationMS)
+			in.TZOffset = OffsetFrom(fn, in.TakenAt, in.DurationMS)
 		}
 	}
 	return in, nil
 }
 
-// offsetFrom recovers the UTC offset when a file has a UTC timestamp (as
+// OffsetFrom recovers the UTC offset when a file has a UTC timestamp (as
 // videos do) and its name holds the local time of the same moment, as phone
 // cameras write it: VID_20230610_140418.mp4 with creation_time 12:04:35Z is
 // UTC+2. The name usually marks the start of a recording and creation_time
 // the end, so the clip's duration is allowed as slack.
-func offsetFrom(local, utc time.Time, durationMS int64) *int {
+func OffsetFrom(local, utc time.Time, durationMS int64) *int {
 	const step = 15 * time.Minute
 	diff := local.Sub(utc)
 	q := diff.Round(step)
@@ -158,7 +159,7 @@ func extractImage(path string, in *Info) {
 		in.FocalLength = round(float64(x.ExifIFD.FocalLength), 2)
 		in.ISO = int(x.ExifIFD.ISOSpeedRatings)
 		if d := x.SelectedDate(); !d.IsZero() && d.Year() > 1900 {
-			in.TakenAt = d
+			in.TakenAt, in.TakenFrom = d, "exif"
 			if loc := x.ExifIFD.OffsetTimeOriginal; loc != nil {
 				_, off := d.In(loc).Zone()
 				m := off / 60

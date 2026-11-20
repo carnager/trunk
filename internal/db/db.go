@@ -137,6 +137,30 @@ CREATE INDEX assets_sha ON assets(sha256) WHERE deleted_at IS NULL;
 
 ALTER TABLE uploads ADD COLUMN source_sha256 TEXT NOT NULL DEFAULT '';
 `,
+	// 3: albums
+	`
+CREATE TABLE albums (
+	id         INTEGER PRIMARY KEY,
+	user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	seq        INTEGER NOT NULL,
+	name       TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	deleted_at INTEGER                    -- tombstone for sync
+);
+CREATE INDEX albums_user_seq ON albums(user_id, seq);
+
+-- pos orders the album; smaller comes first. Adding to the front uses
+-- positions below the current minimum, so nothing has to be renumbered.
+CREATE TABLE album_assets (
+	album_id INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+	asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+	pos      INTEGER NOT NULL,
+	added_at INTEGER NOT NULL,
+	PRIMARY KEY (album_id, asset_id)
+);
+CREATE INDEX album_assets_asset ON album_assets(asset_id);
+`,
 }
 
 func migrate(d *sql.DB) error {

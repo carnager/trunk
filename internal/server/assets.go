@@ -161,11 +161,12 @@ func (s *Server) assetFromPath(w http.ResponseWriter, r *http.Request) (*Asset, 
 	return a, true
 }
 
-// handleChanges is the delta sync feed: every asset whose seq is greater than
-// `since`, oldest change first. Clients store `cursor` and pass it as `since`
-// next time; while `more` is true there is another page waiting.
+// handleChanges is the delta sync feed: every asset and album whose seq is
+// greater than `since`, oldest change first. Clients store `cursor` and pass
+// it as `since` next time; while `more` is true there is another page waiting.
 func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r)
+	ctx := r.Context()
 	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 || limit > 1000 {
@@ -174,7 +175,7 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 	// Read the global seq before querying: any change that commits later gets
 	// a larger seq, so handing this out as the cursor can never skip one.
 	var head int64
-	if err := s.db.QueryRowContext(r.Context(), `SELECT value FROM meta WHERE key = 'seq'`).Scan(&head); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'seq'`).Scan(&head); err != nil {
 		s.internal(w, err)
 		return
 	}
@@ -182,37 +183,48 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 	if since == 0 {
 		q += ` AND deleted_at IS NULL` // a fresh client has nothing to delete
 	}
-	q += ` ORDER BY seq LIMIT ?`
-	rows, err := s.db.QueryContext(r.Context(), q, sess.UserID, since, limit+1)
+	rows, err := s.db.QueryContext(ctx, q+` ORDER BY seq LIMIT ?`, sess.UserID, since, limit+1)
 	if err != nil {
 		s.internal(w, err)
 		return
 	}
-	defer rows.Close()
-	list := []*Asset{}
+	assets := []*Asset{}
 	for rows.Next() {
 		a, err := s.scanAsset(rows)
 		if err != nil {
+			rows.Close()
 			s.internal(w, err)
 			return
 		}
-		list = append(list, a)
+		assets = append(assets, a)
 	}
-	if err := rows.Err(); err != nil {
+	rows.Close()
+	albums, err := s.albumChanges(ctx, sess.UserID, since, limit+1)
+	if err != nil {
 		s.internal(w, err)
 		return
 	}
-	more := len(list) > limit
-	if more {
-		list = list[:limit]
-	}
+
+	// Merge both by seq and keep the first `limit` changes.
+	outAssets, outAlbums := []*Asset{}, []*Album{}
+	i, j := 0, 0
 	cursor := since
-	if len(list) > 0 {
-		cursor = list[len(list)-1].Seq
-	} else if head > since {
-		cursor = head // nothing new for this user; skip past other users' changes
+	for len(outAssets)+len(outAlbums) < limit && (i < len(assets) || j < len(albums)) {
+		if j >= len(albums) || (i < len(assets) && assets[i].Seq < albums[j].Seq) {
+			outAssets = append(outAssets, assets[i])
+			cursor = assets[i].Seq
+			i++
+		} else {
+			outAlbums = append(outAlbums, albums[j])
+			cursor = albums[j].Seq
+			j++
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"assets": list, "cursor": cursor, "more": more})
+	more := i < len(assets) || j < len(albums)
+	if !more && head > cursor {
+		cursor = head // skip past other users' changes
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assets": outAssets, "albums": outAlbums, "cursor": cursor, "more": more})
 }
 
 var reSHA = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -411,6 +423,9 @@ func (s *Server) tombstone(ctx context.Context, id int64) error {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM asset_hashes WHERE asset_id = ?`, id); err != nil {
+		return err
+	}
+	if err := unlistAsset(ctx, tx, id, now); err != nil {
 		return err
 	}
 	return tx.Commit()

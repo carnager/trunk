@@ -93,11 +93,11 @@ func probeVideo(path string, in *Info) {
 	}
 	// QuickTime and MP4 store creation_time in UTC; the local offset is lost.
 	if t, err := time.Parse(time.RFC3339Nano, tags["creation_time"]); err == nil && t.Year() > 1970 {
-		in.TakenAt = t.UTC()
+		in.TakenAt, in.TakenFrom = t.UTC(), "video"
 	}
 	// Apple writes a local time with offset here, which is better when present.
 	if t, err := time.Parse("2006-01-02T15:04:05-0700", tags["com.apple.quicktime.creationdate"]); err == nil {
-		in.TakenAt = t
+		in.TakenAt, in.TakenFrom = t, "video"
 		_, off := t.Zone()
 		m := off / 60
 		in.TZOffset = &m

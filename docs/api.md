@@ -81,16 +81,36 @@ they were. The change gets a new `seq`, so other devices pick it up with their n
 `PUT` returns `409` with `asset_id` if the file is already another asset, `415` if it is not a
 photo, and treats a file identical to the first upload as a revert. Videos cannot be edited.
 
+## Albums
+
+```json
+{"id": 3, "seq": 360, "name": "Urlaub 2024", "asset_ids": [17, 4, 9], "created_at": "…", "updated_at": "…"}
+```
+
+An album is an ordered list of the user's own assets; the photos stay in the library when they
+leave an album or the album is deleted. Albums always come with their complete list.
+
+| | |
+|---|---|
+| `POST /albums` | `{"name", "asset_ids": [..]}` (ids optional) → `201` album |
+| `GET /albums/{id}` | one album |
+| `PATCH /albums/{id}` | `{"name"}` → album |
+| `POST /albums/{id}/add` | `{"ids": [..], "end": false}` → album. Adds to the front (in the order given) or, with `end`, to the back. Ids already in the album keep their place. Only the caller's own live assets; otherwise `400`. |
+| `POST /albums/{id}/remove` | `{"ids": [..]}` → album |
+| `DELETE /albums/{id}` | `204` |
+
+Trashed assets stay in their albums (clients hide them); deleting an asset for good removes it.
+
 ## Delta sync
 
 ```
 GET /changes?since=<cursor>&limit=500
-→ {"assets": [...], "cursor": 351, "more": false}
+→ {"assets": [...], "albums": [...], "cursor": 351, "more": false}
 ```
 
-Returns every asset that changed after `since`, in the order the changes happened: new uploads,
-edits, favourites, trash and restore. Deleted assets come back as tombstones:
-`{"id": 12, "seq": 349, "deleted": true}`. Store `cursor` and pass it as `since` next time;
+Returns every asset and album that changed after `since`, in the order the changes happened: new
+uploads, edits, favourites, trash and restore, album changes. Deleted assets and albums come back
+as tombstones: `{"id": 12, "seq": 349, "deleted": true}`. `limit` counts both together. Store `cursor` and pass it as `since` next time;
 while `more` is true, fetch again straight away. `since=0` (or no `since`) is a full sync and
 leaves out tombstones. `limit` is capped at 1000.
 

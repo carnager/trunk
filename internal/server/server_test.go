@@ -790,3 +790,119 @@ func TestEdits(t *testing.T) {
 		t.Errorf("files left after delete: %v", files)
 	}
 }
+
+type feed struct {
+	Assets []Asset
+	Albums []Album
+	Cursor int64
+	More   bool
+}
+
+func TestAlbums(t *testing.T) {
+	e := newEnv(t)
+	tok := e.login("alice", "phone")
+	var ids []int64
+	for i := range 4 {
+		ids = append(ids, e.upload(tok, fmt.Sprintf("a%d.jpg", i), testJPEG(t, 32, 32, uint8(40+i), false), 201).ID)
+	}
+	var start feed
+	e.json("GET", "/api/v1/changes", tok, nil, 200, &start)
+
+	var al Album
+	e.json("POST", "/api/v1/albums", tok, map[string]any{"name": " Urlaub ", "asset_ids": []int64{ids[0], ids[1]}}, 201, &al)
+	if al.Name != "Urlaub" || fmt.Sprint(al.AssetIDs) != fmt.Sprint([]int64{ids[0], ids[1]}) {
+		t.Fatalf("created: %+v", al)
+	}
+	path := fmt.Sprintf("/api/v1/albums/%d", al.ID)
+	e.json("POST", path+"/add", tok, map[string]any{"ids": []int64{ids[2], ids[3]}}, 200, &al)
+	if fmt.Sprint(al.AssetIDs) != fmt.Sprint([]int64{ids[2], ids[3], ids[0], ids[1]}) {
+		t.Errorf("add to front: %v", al.AssetIDs)
+	}
+	e.json("POST", path+"/remove", tok, map[string]any{"ids": []int64{ids[3]}}, 200, &al)
+	e.json("POST", path+"/add", tok, map[string]any{"ids": []int64{ids[3], ids[0]}, "end": true}, 200, &al)
+	if fmt.Sprint(al.AssetIDs) != fmt.Sprint([]int64{ids[2], ids[0], ids[1], ids[3]}) {
+		t.Errorf("add to end keeps existing places: %v", al.AssetIDs)
+	}
+	e.json("PATCH", path, tok, map[string]string{"name": "Urlaub 2024"}, 200, &al)
+
+	// Bob can neither see the album nor put Alice's photos in his own.
+	bob := e.login("bob", "phone")
+	e.json("GET", path, bob, nil, 404, nil)
+	var bobs Album
+	e.json("POST", "/api/v1/albums", bob, map[string]any{"name": "mine"}, 201, &bobs)
+	e.json("POST", fmt.Sprintf("/api/v1/albums/%d/add", bobs.ID), bob, map[string]any{"ids": []int64{ids[0]}}, 400, nil)
+	var bf feed
+	e.json("GET", "/api/v1/changes", bob, nil, 200, &bf)
+	if len(bf.Albums) != 1 || bf.Albums[0].ID != bobs.ID {
+		t.Errorf("bob's feed albums: %+v", bf.Albums)
+	}
+
+	// The feed carries the album once, in its latest state.
+	var f feed
+	e.json("GET", fmt.Sprintf("/api/v1/changes?since=%d", start.Cursor), tok, nil, 200, &f)
+	if len(f.Albums) != 1 || f.Albums[0].Name != "Urlaub 2024" || len(f.Albums[0].AssetIDs) != 4 {
+		t.Fatalf("feed: %+v", f.Albums)
+	}
+
+	// Deleting a photo for good takes it out of the album, and the album changes.
+	e.json("POST", "/api/v1/assets/trash", tok, map[string][]int64{"ids": {ids[1]}}, 204, nil)
+	e.json("GET", path, tok, nil, 200, &al)
+	if len(al.AssetIDs) != 4 {
+		t.Error("trashed photo should stay listed until deleted")
+	}
+	e.json("POST", "/api/v1/assets/delete", tok, map[string][]int64{"ids": {ids[1]}}, 200, nil)
+	var f2 feed
+	e.json("GET", fmt.Sprintf("/api/v1/changes?since=%d", f.Cursor), tok, nil, 200, &f2)
+	if len(f2.Albums) != 1 || fmt.Sprint(f2.Albums[0].AssetIDs) != fmt.Sprint([]int64{ids[2], ids[0], ids[3]}) {
+		t.Errorf("album after delete: %+v", f2.Albums)
+	}
+
+	// Paging walks through assets and albums together without losing any.
+	for i := range 3 {
+		var x Album
+		e.json("POST", "/api/v1/albums", tok, map[string]any{"name": fmt.Sprintf("x%d", i), "asset_ids": []int64{ids[0]}}, 201, &x)
+	}
+	seenAssets, seenAlbums := map[int64]bool{}, map[int64]bool{}
+	cur := int64(0)
+	for pages := 0; ; pages++ {
+		var p feed
+		e.json("GET", fmt.Sprintf("/api/v1/changes?since=%d&limit=2", cur), tok, nil, 200, &p)
+		if len(p.Assets)+len(p.Albums) > 2 {
+			t.Fatalf("page too big: %+v", p)
+		}
+		// Later pages may carry tombstones of things deleted before; a client just drops them.
+		for _, a := range p.Assets {
+			seenAssets[a.ID] = !a.Deleted
+		}
+		for _, a := range p.Albums {
+			seenAlbums[a.ID] = !a.Deleted
+		}
+		cur = p.Cursor
+		if !p.More {
+			break
+		}
+		if pages > 20 {
+			t.Fatal("paging does not end")
+		}
+	}
+	live := func(m map[int64]bool) (n int) {
+		for _, ok := range m {
+			if ok {
+				n++
+			}
+		}
+		return n
+	}
+	if live(seenAssets) != 3 || live(seenAlbums) != 4 {
+		t.Errorf("paged full sync saw %d assets, %d albums; want 3, 4", live(seenAssets), live(seenAlbums))
+	}
+
+	// Deleting the album leaves a tombstone and keeps the photos.
+	e.json("DELETE", path, tok, nil, 204, nil)
+	var f3 feed
+	e.json("GET", fmt.Sprintf("/api/v1/changes?since=%d", cur), tok, nil, 200, &f3)
+	if len(f3.Albums) != 1 || !f3.Albums[0].Deleted || f3.Albums[0].ID != al.ID {
+		t.Errorf("album tombstone: %+v", f3.Albums)
+	}
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", ids[0]), tok, nil, 200, nil)
+}

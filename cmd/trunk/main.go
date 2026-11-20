@@ -12,11 +12,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/carnager/trunk/internal/server"
+	"github.com/carnager/trunk/internal/takeout"
 	"golang.org/x/term"
 )
 
@@ -30,6 +32,8 @@ Usage:
   trunk user add NAME [-admin]     create an account (asks for a password)
   trunk user passwd NAME           set a new password
   trunk user list                  list accounts
+  trunk import takeout -user NAME [-dry-run] [-jobs N] ZIP|DIR...
+                                   import a Google Photos export from Google Takeout
   trunk version
 
 Every command takes -data DIR (default $TRUNK_DATA or ./data).
@@ -48,6 +52,12 @@ func main() {
 		err = cmdServe(os.Args[2:])
 	case "user":
 		err = cmdUser(os.Args[2:])
+	case "import":
+		if len(os.Args) < 3 || os.Args[2] != "takeout" {
+			usage()
+			os.Exit(2)
+		}
+		err = cmdImportTakeout(os.Args[3:])
 	case "version", "-version", "--version":
 		fmt.Println("trunk", version)
 	case "help", "-h", "-help", "--help":
@@ -268,4 +278,92 @@ func readPassword() (string, error) {
 		return "", errors.New("use at least 8 characters")
 	}
 	return string(a), nil
+}
+
+func cmdImportTakeout(args []string) error {
+	fs := flag.NewFlagSet("import takeout", flag.ExitOnError)
+	data := dataFlag(fs)
+	user := fs.String("user", "", "account to import into (required)")
+	dry := fs.Bool("dry-run", false, "only show what would be imported")
+	jobs := fs.Int("jobs", min(4, runtime.NumCPU()), "files to import at once")
+	// Allow flags after the inputs too: trunk import takeout *.zip -user alice
+	var inputs []string
+	rest := args
+	for {
+		fs.Parse(rest)
+		if fs.NArg() == 0 {
+			break
+		}
+		inputs = append(inputs, fs.Arg(0))
+		rest = fs.Args()[1:]
+	}
+	if *user == "" || len(inputs) == 0 {
+		return errors.New("usage: trunk import takeout -user NAME [-dry-run] [-jobs N] ZIP|DIR...")
+	}
+
+	entries, closer, err := takeout.Sources(inputs)
+	if err != nil {
+		return err
+	}
+	defer closer.Close()
+	fmt.Printf("reading %d files from %d inputs\n", len(entries), len(inputs))
+	plan := takeout.NewPlan(entries)
+
+	var edits, withSidecar int
+	var bytes int64
+	for _, it := range plan.Items {
+		bytes += it.Size
+		if it.EditOf != nil {
+			edits++
+		}
+		if it.Sidecar != nil {
+			withSidecar++
+		}
+	}
+	fmt.Printf("%d photo and video files (%.1f GB; album folders repeat photos, which are stored once), "+
+		"%d edits of another photo, %d with Google metadata\n",
+		len(plan.Items)-edits, float64(bytes)/(1<<30), edits, withSidecar)
+	fmt.Printf("%d albums", len(plan.Albums))
+	if len(plan.Albums) > 0 {
+		names := make([]string, 0, len(plan.Albums))
+		for _, a := range plan.Albums {
+			names = append(names, fmt.Sprintf("%s (%d)", a.Name, len(a.Items)))
+		}
+		fmt.Printf(": %s", strings.Join(names, ", "))
+	}
+	fmt.Println()
+	if len(plan.Skipped) > 0 {
+		fmt.Printf("%d other files skipped (HTML, unknown types, trash)\n", len(plan.Skipped))
+	}
+	if *dry {
+		return nil
+	}
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	srv, err := server.New(server.Config{DataDir: *data}, log)
+	if err != nil {
+		return err
+	}
+	defer srv.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	im, err := srv.Importer(ctx, *user)
+	if err != nil {
+		return err
+	}
+	start := time.Now()
+	res := takeout.Run(ctx, im, plan, *jobs, os.Stdout)
+	fmt.Printf("done in %s: %d added, %d already there, %d edits, %d failed; albums: %d new, %d updated\n",
+		time.Since(start).Round(time.Second), res.Added, res.Existing, res.Edits, res.Failed,
+		res.AlbumsCreated, res.AlbumsUpdated)
+	for _, e := range res.Errors {
+		fmt.Fprintln(os.Stderr, "  "+e)
+	}
+	if ctx.Err() != nil {
+		return errors.New("interrupted; run the same command again to continue")
+	}
+	if res.Failed > 0 {
+		return fmt.Errorf("%d files failed", res.Failed)
+	}
+	return nil
 }

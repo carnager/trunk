@@ -126,6 +126,13 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/v1/assets/restore", s.auth(s.handleRestore))
 	m.HandleFunc("POST /api/v1/assets/delete", s.auth(s.handleDelete))
 
+	m.HandleFunc("POST /api/v1/albums", s.auth(s.handleCreateAlbum))
+	m.HandleFunc("GET /api/v1/albums/{id}", s.auth(s.handleGetAlbum))
+	m.HandleFunc("PATCH /api/v1/albums/{id}", s.auth(s.handlePatchAlbum))
+	m.HandleFunc("DELETE /api/v1/albums/{id}", s.auth(s.handleDeleteAlbum))
+	m.HandleFunc("POST /api/v1/albums/{id}/add", s.auth(s.handleAlbumAdd))
+	m.HandleFunc("POST /api/v1/albums/{id}/remove", s.auth(s.handleAlbumRemove))
+
 	m.HandleFunc("OPTIONS /api/v1/uploads", s.handleTusOptions)
 	m.HandleFunc("OPTIONS /api/v1/uploads/{id}", s.handleTusOptions)
 	m.HandleFunc("POST /api/v1/uploads", s.auth(s.handleTusCreate))
@@ -151,6 +158,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			"tus":           true,
 			"edits":         true,
 			"source_sha256": true,
+			"albums":        true,
 		},
 		"thumb_sizes": media.Sizes,
 	})

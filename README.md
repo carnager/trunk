@@ -33,6 +33,22 @@ data/
   uploads/                     unfinished uploads
 ```
 
+### Moving from Google Photos
+
+Ask [Google Takeout](https://takeout.google.com) for Google Photos only, as .zip files, and point
+trunk at them; no need to unpack:
+
+```sh
+./trunk import takeout ~/Downloads/takeout-*.zip -user alice -dry-run   # see what it will do
+./trunk import takeout ~/Downloads/takeout-*.zip -user alice
+```
+
+It can run while the server is up. Dates and places come from the photos themselves and, where
+they lack them, from Google's JSON files (which also give photos without an offset their time
+zone). Favourites stay favourites, albums become trunk albums, and Google's "-edited" copies
+become edits of their originals, so both versions are kept. Running it again only adds what is
+missing, e.g. after a broken download.
+
 The originals tree is the source of truth and stays readable without trunk. Back up
 `originals/` and `trunk.db`; thumbnails can be regenerated.
 
@@ -42,10 +58,10 @@ The API is described in [docs/api.md](docs/api.md).
 
 Done: accounts and per-device tokens, simple and resumable (tus) upload with SHA-256
 deduplication, metadata (EXIF, QuickTime, file names), thumbnails and video posters, delta sync,
-favourites, trash with expiry, edits that keep the first upload.
+favourites, trash with expiry, edits that keep the first upload, albums, Google Takeout import.
 
-Next: albums, Google Takeout import (`trunk import takeout`), then a small web UI and share
-links, then search and faces.
+Next: albums shared within the household, then a small web UI and share links, then search and
+faces.
 
 ## Brand
 
