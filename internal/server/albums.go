@@ -29,6 +29,7 @@ type Album struct {
 	AssetIDs  []int64    `json:"asset_ids"`
 	Owner     *UserRef   `json:"owner,omitempty"`
 	Members   []Member   `json:"members,omitempty"`
+	Kind      string     `json:"kind,omitempty"`    // "direct" for photos sent to someone; empty for albums
 	Role      string     `json:"role,omitempty"`    // owner | member
 	CanAdd    bool       `json:"can_add,omitempty"` // whether the caller may add photos
 	CreatedAt *time.Time `json:"created_at,omitempty"`
@@ -55,7 +56,7 @@ type Member struct {
 // membership that ended keeps the seq of its end, and the album is gone.
 const albumSel = `SELECT al.id, al.user_id, ow.name,
 	CASE WHEN m.removed_at IS NOT NULL THEN m.seq ELSE MAX(al.seq, COALESCE(m.seq, 0)) END AS eseq,
-	al.name, al.created_at, al.updated_at,
+	al.name, al.kind, al.created_at, al.updated_at,
 	(al.deleted_at IS NOT NULL OR m.removed_at IS NOT NULL) AS gone,
 	COALESCE(m.can_add, 1)
 	FROM albums al JOIN users ow ON ow.id = al.user_id
@@ -67,8 +68,12 @@ func (s *Server) scanAlbum(sc scanner, viewer int64) (*Album, error) {
 	var ownerName string
 	var created, updated int64
 	var gone, canAdd bool
-	if err := sc.Scan(&a.ID, &a.userID, &ownerName, &a.Seq, &a.Name, &created, &updated, &gone, &canAdd); err != nil {
+	var kind string
+	if err := sc.Scan(&a.ID, &a.userID, &ownerName, &a.Seq, &a.Name, &kind, &created, &updated, &gone, &canAdd); err != nil {
 		return nil, err
+	}
+	if kind != "album" {
+		a.Kind = kind
 	}
 	if gone {
 		return &Album{ID: a.ID, Seq: a.Seq, Deleted: true, userID: a.userID}, nil
@@ -235,8 +240,8 @@ func (s *Server) CreateAlbum(ctx context.Context, userID int64, name string) (in
 // AlbumByName finds a live album of the user by exact name.
 func (s *Server) AlbumByName(ctx context.Context, userID int64, name string) (int64, bool, error) {
 	var id int64
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM albums WHERE user_id = ? AND name = ? AND deleted_at IS NULL
-		ORDER BY id LIMIT 1`, userID, name).Scan(&id)
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM albums WHERE user_id = ? AND name = ? AND kind = 'album'
+		AND deleted_at IS NULL ORDER BY id LIMIT 1`, userID, name).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -418,6 +423,10 @@ func (s *Server) handlePatchAlbum(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
+	if req.Name != nil && a.Kind == "direct" {
+		httpError(w, http.StatusBadRequest, "photos sent to someone have no name of their own")
+		return
+	}
 	if req.Name != nil {
 		name, ok := albumName(w, *req.Name)
 		if !ok {
@@ -585,6 +594,10 @@ func (s *Server) handleSetMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if a.Kind == "direct" {
+		httpError(w, http.StatusBadRequest, "send photos to someone else with POST /shares")
+		return
+	}
 	userID, err := strconv.ParseInt(r.PathValue("user"), 10, 64)
 	if err != nil || userID == a.userID {
 		httpError(w, http.StatusBadRequest, "bad user")
@@ -681,4 +694,79 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": list})
+}
+
+// handleShare sends photos to someone in the household:
+//
+//	POST /api/v1/shares {"user_id": 2, "asset_ids": [..]}
+//
+// They go to the front of the one "direct" album from the caller to that
+// person, made on first use and shared with them view-only. The answer is
+// that album. Taking a photo back is removing it from the album; deleting
+// the album ends the sharing; the recipient can leave it to hide it.
+func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	me := sessionFrom(r).UserID
+	var req struct {
+		UserID   int64   `json:"user_id"`
+		AssetIDs []int64 `json:"asset_ids"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if len(req.AssetIDs) == 0 || len(req.AssetIDs) > 5000 {
+		httpError(w, http.StatusBadRequest, "need 1 to 5000 asset_ids")
+		return
+	}
+	var name string
+	if req.UserID == me || s.db.QueryRowContext(ctx, `SELECT name FROM users WHERE id = ?`, req.UserID).Scan(&name) != nil {
+		httpError(w, http.StatusBadRequest, "no such person")
+		return
+	}
+	s.shareMu.Lock()
+	defer s.shareMu.Unlock()
+	var albumID int64
+	err := s.db.QueryRowContext(ctx, `SELECT al.id FROM albums al JOIN album_members m ON m.album_id = al.id
+		WHERE al.user_id = ? AND al.kind = 'direct' AND al.deleted_at IS NULL AND m.user_id = ?
+		ORDER BY al.id LIMIT 1`, me, req.UserID).Scan(&albumID)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = s.inTx(ctx, func(tx *sql.Tx, seq, now int64) error {
+			res, err := tx.ExecContext(ctx, `INSERT INTO albums (user_id, seq, name, kind, created_at, updated_at)
+				VALUES (?, ?, ?, 'direct', ?, ?)`, me, seq, name, now, now)
+			if err != nil {
+				return err
+			}
+			if albumID, err = res.LastInsertId(); err != nil {
+				return err
+			}
+			memberSeq, err := db.NextSeq(ctx, tx)
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO album_members (album_id, user_id, can_add, seq) VALUES (?, ?, 0, ?)`,
+				albumID, req.UserID, memberSeq)
+			return err
+		})
+	} else if err == nil {
+		// Hidden by the recipient earlier: sending again brings it back.
+		err = s.inTx(ctx, func(tx *sql.Tx, seq, now int64) error {
+			_, err := tx.ExecContext(ctx, `UPDATE album_members SET removed_at = NULL, seq = ?
+				WHERE album_id = ? AND user_id = ? AND removed_at IS NOT NULL`, seq, albumID, req.UserID)
+			return err
+		})
+	}
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	if err := s.AddToAlbum(ctx, me, albumID, req.AssetIDs, false); err != nil {
+		s.albumError(w, err)
+		return
+	}
+	a, err := s.getAlbum(ctx, me, albumID)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, a)
 }

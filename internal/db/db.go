@@ -185,6 +185,33 @@ CREATE INDEX album_members_user ON album_members(user_id);
 ALTER TABLE album_assets ADD COLUMN added_by INTEGER;
 UPDATE album_assets SET added_by = (SELECT user_id FROM albums WHERE albums.id = album_assets.album_id);
 `,
+	// 6: photos sent directly to someone in the household
+	`
+-- album: an ordinary album. direct: the photos one person sent another,
+-- one per pair, shared with the recipient who cannot add to it.
+ALTER TABLE albums ADD COLUMN kind TEXT NOT NULL DEFAULT 'album';
+`,
+	// 7: public links for people without an account
+	`
+-- A link shows either an album (as it is now) or a fixed selection of photos.
+CREATE TABLE links (
+	token      TEXT PRIMARY KEY,
+	user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	album_id   INTEGER REFERENCES albums(id) ON DELETE CASCADE,
+	title      TEXT NOT NULL,
+	download   INTEGER NOT NULL DEFAULT 1,  -- whether originals may be downloaded
+	created_at INTEGER NOT NULL,
+	expires_at INTEGER,
+	revoked_at INTEGER
+);
+CREATE INDEX links_user ON links(user_id);
+CREATE TABLE link_assets (
+	token    TEXT NOT NULL REFERENCES links(token) ON DELETE CASCADE,
+	asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+	pos      INTEGER NOT NULL,
+	PRIMARY KEY (token, asset_id)
+);
+`,
 }
 
 func migrate(d *sql.DB) error {

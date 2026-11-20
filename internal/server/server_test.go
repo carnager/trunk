@@ -1069,3 +1069,164 @@ func TestSharedAlbums(t *testing.T) {
 	// Bob's own photo is still his.
 	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", b1.ID), bob, nil, 200, nil)
 }
+
+func TestDirectShares(t *testing.T) {
+	e := newEnv(t)
+	alice, bob := e.login("alice", "phone"), e.login("bob", "phone")
+	p1 := e.upload(alice, "a.jpg", testJPEG(t, 32, 32, 71, false), 201)
+	p2 := e.upload(alice, "b.jpg", testJPEG(t, 32, 32, 72, false), 201)
+	var users struct{ Users []UserRef }
+	e.json("GET", "/api/v1/users", alice, nil, 200, &users)
+	bobID := users.Users[0].ID
+
+	var al Album
+	e.json("POST", "/api/v1/shares", alice, map[string]any{"user_id": bobID, "asset_ids": []int64{p1.ID}}, 200, &al)
+	if al.Kind != "direct" || al.Role != "owner" || al.Name != "bob" || len(al.Members) != 1 || al.Members[0].CanAdd {
+		t.Fatalf("sender's view: %+v", al)
+	}
+	var again Album
+	e.json("POST", "/api/v1/shares", alice, map[string]any{"user_id": bobID, "asset_ids": []int64{p2.ID}}, 200, &again)
+	if again.ID != al.ID || fmt.Sprint(again.AssetIDs) != fmt.Sprint([]int64{p2.ID, p1.ID}) {
+		t.Errorf("second send: %+v", again)
+	}
+	path := fmt.Sprintf("/api/v1/albums/%d", al.ID)
+
+	var bf feed
+	e.json("GET", "/api/v1/changes", bob, nil, 200, &bf)
+	if len(bf.Albums) != 1 || bf.Albums[0].Kind != "direct" || bf.Albums[0].Owner.Name != "alice" || bf.Albums[0].CanAdd {
+		t.Fatalf("recipient's feed: %+v", bf.Albums)
+	}
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d/thumb/small", p1.ID), bob, nil, 200, nil)
+	b1 := e.upload(bob, "c.jpg", testJPEG(t, 32, 32, 73, false), 201)
+	e.json("POST", path+"/add", bob, map[string]any{"ids": []int64{b1.ID}}, 403, nil)
+
+	// Not an ordinary album: no name, no extra members, no sending to oneself.
+	e.json("PATCH", path, alice, map[string]string{"name": "x"}, 400, nil)
+	e.json("PUT", fmt.Sprintf("%s/members/%d", path, bobID), alice, map[string]any{}, 400, nil)
+	var me struct{ ID int64 }
+	e.json("GET", "/api/v1/me", alice, nil, 200, &me)
+	e.json("POST", "/api/v1/shares", alice, map[string]any{"user_id": me.ID, "asset_ids": []int64{p1.ID}}, 400, nil)
+	e.json("POST", "/api/v1/shares", bob, map[string]any{"user_id": me.ID, "asset_ids": []int64{p1.ID}}, 400, nil) // not bob's photo
+
+	// Hidden by the recipient, back with the next photo.
+	e.json("DELETE", fmt.Sprintf("%s/members/%d", path, bobID), bob, nil, 204, nil)
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", p1.ID), bob, nil, 404, nil)
+	p3 := e.upload(alice, "d.jpg", testJPEG(t, 32, 32, 74, false), 201)
+	e.json("POST", "/api/v1/shares", alice, map[string]any{"user_id": bobID, "asset_ids": []int64{p3.ID}}, 200, &again)
+	if again.ID != al.ID {
+		t.Error("a new direct album instead of the old one")
+	}
+	e.json("GET", path, bob, nil, 200, nil)
+
+	// The sender ends it.
+	e.json("GET", "/api/v1/changes", bob, nil, 200, &bf)
+	cur := bf.Cursor
+	e.json("DELETE", path, alice, nil, 204, nil)
+	e.json("GET", fmt.Sprintf("/api/v1/changes?since=%d", cur), bob, nil, 200, &bf)
+	if len(bf.Albums) != 1 || !bf.Albums[0].Deleted {
+		t.Errorf("ended share in recipient's feed: %+v", bf.Albums)
+	}
+}
+
+func TestPublicLinks(t *testing.T) {
+	e := newEnv(t)
+	alice, bob := e.login("alice", "phone"), e.login("bob", "phone")
+	p1 := e.upload(alice, "berlin.jpg", testJPEG(t, 64, 48, 81, true), 201) // EXIF GPS 52.52, 13.41
+	p2 := e.upload(alice, "zwei.jpg", testJPEG(t, 64, 48, 82, false), 201)
+	p3 := e.upload(alice, "privat.jpg", testJPEG(t, 64, 48, 83, false), 201)
+	e.json("PATCH", fmt.Sprintf("/api/v1/assets/%d", p1.ID), alice, map[string]string{"caption": "Am Tor"}, 200, nil)
+	var al Album
+	e.json("POST", "/api/v1/albums", alice, map[string]any{"name": "Ausflug", "asset_ids": []int64{p1.ID, p2.ID}}, 201, &al)
+	// Bob contributes to the album: his photo must not go public with Alice's link.
+	var users struct{ Users []UserRef }
+	e.json("GET", "/api/v1/users", alice, nil, 200, &users)
+	e.json("PUT", fmt.Sprintf("/api/v1/albums/%d/members/%d", al.ID, users.Users[0].ID), alice, map[string]any{}, 200, nil)
+	b1 := e.upload(bob, "bob.jpg", testJPEG(t, 64, 48, 84, false), 201)
+	e.json("POST", fmt.Sprintf("/api/v1/albums/%d/add", al.ID), bob, map[string]any{"ids": []int64{b1.ID}, "end": true}, 200, nil)
+
+	page := func(path string) (int, string) {
+		res := e.do("GET", path, "", nil, nil)
+		b, _ := io.ReadAll(res.Body)
+		return res.StatusCode, string(b)
+	}
+	var link Link
+	e.json("POST", "/api/v1/links", alice, map[string]any{"album_id": al.ID}, 201, &link)
+	if link.Title != "Ausflug" || !link.Download || link.Path != "/s/"+link.Token || len(link.Token) < 20 {
+		t.Fatalf("album link: %+v", link)
+	}
+	code, body := page(link.Path)
+	if code != 200 || !strings.Contains(body, "Ausflug") || !strings.Contains(body, "Am Tor") || !strings.Contains(body, "Berlin") {
+		t.Fatalf("page: %d %.300s", code, body)
+	}
+	if strings.Contains(body, "52.52") || strings.Contains(body, "13.41") {
+		t.Error("page shows coordinates")
+	}
+	for _, id := range []int64{p1.ID, p2.ID} {
+		if !strings.Contains(body, fmt.Sprintf("/t/%d/medium", id)) {
+			t.Errorf("photo %d missing from page", id)
+		}
+	}
+	if strings.Contains(body, fmt.Sprintf("/t/%d/", b1.ID)) || strings.Contains(body, fmt.Sprintf("/t/%d/", p3.ID)) {
+		t.Error("page shows a photo that is not alice's album photo")
+	}
+	if c, _ := page(fmt.Sprintf("%s/t/%d/preview", link.Path, p1.ID)); c != 200 {
+		t.Errorf("thumb: %d", c)
+	}
+	res := e.do("GET", fmt.Sprintf("%s/f/%d?dl", link.Path, p1.ID), "", nil, nil)
+	if res.StatusCode != 200 || !strings.HasPrefix(res.Header.Get("Content-Disposition"), "attachment") {
+		t.Errorf("download: %d %q", res.StatusCode, res.Header.Get("Content-Disposition"))
+	}
+	for _, id := range []int64{b1.ID, p3.ID} {
+		if c, _ := page(fmt.Sprintf("%s/t/%d/small", link.Path, id)); c != 404 {
+			t.Errorf("photo %d through the link: %d", id, c)
+		}
+	}
+	// Trashed photos leave the link.
+	e.json("POST", "/api/v1/assets/trash", alice, map[string][]int64{"ids": {p2.ID}}, 204, nil)
+	if _, body := page(link.Path); strings.Contains(body, fmt.Sprintf("/t/%d/", p2.ID)) {
+		t.Error("trashed photo still on the page")
+	}
+
+	// A selection without downloads.
+	var sel Link
+	e.json("POST", "/api/v1/links", alice, map[string]any{"asset_ids": []int64{p3.ID}, "download": false, "title": "Nur eins"}, 201, &sel)
+	if sel.Download || fmt.Sprint(sel.AssetIDs) != fmt.Sprint([]int64{p3.ID}) {
+		t.Errorf("selection link: %+v", sel)
+	}
+	if c, body := page(sel.Path); c != 200 || strings.Contains(body, "Herunterladen") {
+		t.Errorf("no-download page: %d", c)
+	}
+	if c, _ := page(fmt.Sprintf("%s/f/%d", sel.Path, p3.ID)); c != 404 {
+		t.Errorf("original without download right: %d", c)
+	}
+
+	// Only one's own.
+	e.json("POST", "/api/v1/links", bob, map[string]any{"album_id": al.ID}, 404, nil)
+	e.json("POST", "/api/v1/links", bob, map[string]any{"asset_ids": []int64{p1.ID}}, 400, nil)
+
+	var list struct{ Links []Link }
+	e.json("GET", "/api/v1/links", alice, nil, 200, &list)
+	if len(list.Links) != 2 {
+		t.Errorf("links: %+v", list)
+	}
+
+	// Revoked and expired links show nothing.
+	e.json("DELETE", "/api/v1/links/"+sel.Token, alice, nil, 204, nil)
+	if c, body := page(sel.Path); c != 404 || !strings.Contains(body, "gilt nicht mehr") {
+		t.Errorf("revoked page: %d", c)
+	}
+	if c, _ := page(fmt.Sprintf("%s/t/%d/small", sel.Path, p3.ID)); c != 404 {
+		t.Errorf("revoked thumb: %d", c)
+	}
+	e.srv.db.Exec(`UPDATE links SET expires_at = 1 WHERE token = ?`, link.Token)
+	if c, _ := page(link.Path); c != 404 {
+		t.Errorf("expired page: %d", c)
+	}
+	e.json("GET", "/api/v1/links", alice, nil, 200, &list)
+	if len(list.Links) != 0 {
+		t.Errorf("gone links still listed: %+v", list)
+	}
+	if c, _ := page("/s/nonsense"); c != 404 {
+		t.Errorf("unknown link: %d", c)
+	}
+}

@@ -128,6 +128,32 @@ Any change to a photo in a shared album (edit, caption, favourite, trash) gives 
 photos can be read (`/assets/{id}`, `/file`, `/original`, `/thumb`) but only changed by their
 owner. A member who leaves or is removed gets the album as a tombstone.
 
+### Sending photos to someone
+
+`POST /shares {"user_id", "asset_ids": [..]}` → album. Photos go to the front of the one album of
+`"kind": "direct"` from the caller to that person, made on first use and shared with them
+view-only. Its `name` is the recipient's name. Remove photos from it to take them back, delete it
+to stop sharing; the recipient can leave it (`DELETE /albums/{id}/members/{own id}`) to hide it,
+and the next photo sent brings it back. Direct albums cannot be renamed or get more members.
+
+### Public links
+
+For people without an account. A link shows an album as it is now, or a fixed selection.
+
+| | |
+|---|---|
+| `POST /links` | `{"album_id"}` or `{"asset_ids": [..]}`, optional `"title"`, `"download"` (default true), `"expires_days"` → `201` link |
+| `GET /links` | the caller's live links |
+| `DELETE /links/{token}` | revoke → `204` |
+
+A link is `{"token", "path": "/s/<token>", "title", "album_id"|"asset_ids", "download", "created_at",
+"expires_at"}`; its address is the server's address plus `path`. Only one's own photos and albums
+can be linked, and an album link shows only the owner's photos in it, not what household members
+added. The page at `/s/<token>` (no login) shows previews with date, town and caption, never
+coordinates; with `download`, originals can be downloaded, and those carry their EXIF data,
+location included. Videos play either way. Trashed photos leave the link; revoked and expired
+links show nothing.
+
 ## Delta sync
 
 ```

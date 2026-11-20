@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>{{if .Gone}}Link abgelaufen{{else}}{{.Title}}{{end}} · trunk</title>
+<style>
+  :root { --night: #241A5C; --violet: #5B3FD9; --sun: #FFC93C; --ink: #1E1B3A; --bg: #F6F4FC; --muted: #625C86; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #13102A; --ink: #EEEAFB; --muted: #A9A2CF; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { background: var(--night); color: #F3EEFF; padding: 28px max(16px, env(safe-area-inset-left)) 22px; }
+  header .brand { font-weight: 700; letter-spacing: .02em; opacity: .7; font-size: .85rem; }
+  header h1 { margin: 6px 0 2px; font-size: clamp(1.5rem, 1.1rem + 2vw, 2.2rem); line-height: 1.15; }
+  header p { margin: 0; opacity: .75; font-size: .95rem; }
+  main { padding: 12px max(12px, env(safe-area-inset-left)) 40px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+  .grid button { position: relative; border: 0; padding: 0; aspect-ratio: 1; overflow: hidden; border-radius: 10px; cursor: zoom-in; background: #0002; }
+  .grid img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .grid .play { position: absolute; left: 8px; bottom: 6px; color: #fff; font-size: 20px; text-shadow: 0 1px 4px #000a; }
+  footer { text-align: center; color: var(--muted); font-size: .85rem; padding: 0 16px 32px; }
+  .gone { max-width: 34rem; margin: 15vh auto; text-align: center; padding: 0 16px; }
+  #box { position: fixed; inset: 0; background: #000; display: none; flex-direction: column; z-index: 10; }
+  #box.open { display: flex; }
+  #stage { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; touch-action: pan-y; }
+  #stage img, #stage video { max-width: 100%; max-height: 100%; object-fit: contain; }
+  #bar { color: #eee; padding: 10px 14px calc(12px + env(safe-area-inset-bottom)); display: flex; gap: 12px; align-items: center; background: #0008; }
+  #bar .text { flex: 1; min-width: 0; font-size: .95rem; }
+  #bar .text small { display: block; color: #bbb; }
+  #bar a, #bar button { color: #fff; background: #ffffff1f; border: 0; border-radius: 999px; padding: 8px 14px; font: inherit; text-decoration: none; cursor: pointer; }
+  .nav { position: fixed; top: 50%; transform: translateY(-50%); background: #0006; color: #fff; border: 0; width: 44px; height: 44px; border-radius: 50%; font-size: 22px; cursor: pointer; z-index: 11; }
+  #prev { left: 10px; } #next { right: 10px; } #close { position: fixed; top: 10px; right: 10px; z-index: 11; }
+  /* On touch screens swiping replaces the arrows; closing stays a button. */
+  @media (hover: none) { #prev, #next { display: none; } }
+</style>
+</head>
+<body>
+{{if .Gone}}
+<div class="gone">
+  <h1>Dieser Link gilt nicht mehr</h1>
+  <p>Er ist abgelaufen oder wurde zurückgezogen. Frag die Person, die ihn dir geschickt hat.</p>
+</div>
+{{else}}
+<header>
+  <div class="brand">trunk</div>
+  <h1>{{.Title}}</h1>
+  <p>{{if .Owner}}Geteilt von {{.Owner}} · {{end}}{{len .Assets}} {{if eq (len .Assets) 1}}Bild{{else}}Bilder{{end}}</p>
+</header>
+<main>
+  <div class="grid">
+    {{range $i, $a := .Assets}}
+    <button data-i="{{$i}}" aria-label="Bild {{$i}} öffnen"><img loading="lazy" src="/s/{{$.Token}}/t/{{$a.ID}}/medium" alt="">{{if eq $a.Kind "video"}}<span class="play">▶</span>{{end}}</button>
+    {{end}}
+  </div>
+</main>
+<footer>Geteilt mit trunk</footer>
+<div id="box" role="dialog" aria-modal="true">
+  <button class="nav" id="close" aria-label="Schließen">✕</button>
+  <button class="nav" id="prev" aria-label="Zurück">‹</button>
+  <button class="nav" id="next" aria-label="Weiter">›</button>
+  <div id="stage"></div>
+  <div id="bar"><div class="text" id="info"></div>{{if .Download}}<a id="dl" href="#">Herunterladen</a>{{end}}</div>
+</div>
+<script>
+  const items = [{{range .Assets}}{id: {{.ID}}, video: {{eq .Kind "video"}}, caption: {{.Caption}}, place: {{with .Place}}{{.City}}{{else}}""{{end}}, date: {{date .}}},{{end}}];
+  const token = {{.Token}};
+  const box = document.getElementById('box'), stage = document.getElementById('stage'), info = document.getElementById('info'), dl = document.getElementById('dl');
+  let cur = -1;
+  function show(i) {
+    if (i < 0 || i >= items.length) return;
+    cur = i;
+    const it = items[i];
+    stage.replaceChildren();
+    let el;
+    if (it.video) {
+      el = document.createElement('video');
+      el.controls = true; el.autoplay = true; el.playsInline = true;
+      el.poster = `/s/${token}/t/${it.id}/preview`;
+      el.src = `/s/${token}/f/${it.id}`;
+    } else {
+      el = document.createElement('img');
+      el.src = `/s/${token}/t/${it.id}/preview`;
+      el.alt = it.caption || '';
+    }
+    stage.append(el);
+    const line = [it.date, it.place].filter(Boolean).join(' · ');
+    info.replaceChildren();
+    if (it.caption) { info.append(it.caption); }
+    if (line) { const s = document.createElement('small'); s.textContent = line; info.append(s); }
+    if (dl) dl.href = `/s/${token}/f/${it.id}?dl`;
+    // Opening adds a history entry, so the back button closes the photo instead of leaving the page.
+    if (box.classList.contains('open')) history.replaceState({photo: true}, '', '#' + it.id);
+    else history.pushState({photo: true}, '', '#' + it.id);
+    box.classList.add('open');
+  }
+  function hide() { box.classList.remove('open'); stage.replaceChildren(); }
+  function close() { if (history.state && history.state.photo) history.back(); else { hide(); history.replaceState(null, '', location.pathname); } }
+  window.addEventListener('popstate', () => { if (box.classList.contains('open')) hide(); });
+  document.querySelectorAll('.grid button').forEach(b => b.addEventListener('click', () => show(+b.dataset.i)));
+  document.getElementById('close').onclick = close;
+  document.getElementById('prev').onclick = () => show(cur - 1);
+  document.getElementById('next').onclick = () => show(cur + 1);
+  document.addEventListener('keydown', e => {
+    if (!box.classList.contains('open')) return;
+    if (e.key === 'Escape') close();
+    if (e.key === 'ArrowLeft') show(cur - 1);
+    if (e.key === 'ArrowRight') show(cur + 1);
+  });
+  let x0 = null;
+  stage.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; }, {passive: true});
+  stage.addEventListener('touchend', e => {
+    if (x0 === null) return;
+    const dx = e.changedTouches[0].clientX - x0; x0 = null;
+    if (Math.abs(dx) > 50) show(cur + (dx < 0 ? 1 : -1));
+  });
+  stage.addEventListener('click', e => { if (e.target === stage) close(); });
+  const start = items.findIndex(it => '#' + it.id === location.hash);
+  if (start >= 0) show(start);
+</script>
+{{end}}
+</body>
+</html>

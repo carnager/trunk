@@ -560,6 +560,15 @@ func (s *Server) handleOriginal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, rel, mimeType, name, sha string) {
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": name}))
+	w.Header().Set("ETag", `"`+sha+`"`)
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	s.serveFileRaw(w, r, rel, mimeType)
+}
+
+// serveFileRaw sends a file from the library; ServeContent handles Range, so
+// videos stream and seek.
+func (s *Server) serveFileRaw(w http.ResponseWriter, r *http.Request, rel, mimeType string) {
 	f, err := os.Open(filepath.Join(s.originals, filepath.FromSlash(rel)))
 	if err != nil {
 		s.internal(w, fmt.Errorf("serving %s: %w", rel, err))
@@ -572,10 +581,6 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, rel, mimeType
 		return
 	}
 	w.Header().Set("Content-Type", mimeType)
-	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": name}))
-	w.Header().Set("ETag", `"`+sha+`"`)
-	w.Header().Set("Cache-Control", "private, max-age=86400")
-	// ServeContent handles Range, so videos stream and seek.
 	http.ServeContent(w, r, "", st.ModTime(), f)
 }
 

@@ -42,6 +42,7 @@ type Server struct {
 	seen   map[int64]time.Time
 
 	ingestMu sync.Mutex // serialises duplicate check, file placement and insert
+	shareMu  sync.Mutex // one direct album per pair, even with two sends at once
 
 	thumbQ    chan int64
 	thumbSem  chan struct{}
@@ -138,6 +139,15 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("PUT /api/v1/albums/{id}/members/{user}", s.auth(s.handleSetMember))
 	m.HandleFunc("DELETE /api/v1/albums/{id}/members/{user}", s.auth(s.handleRemoveMember))
 	m.HandleFunc("GET /api/v1/users", s.auth(s.handleUsers))
+	m.HandleFunc("POST /api/v1/shares", s.auth(s.handleShare))
+	m.HandleFunc("POST /api/v1/links", s.auth(s.handleCreateLink))
+	m.HandleFunc("GET /api/v1/links", s.auth(s.handleLinks))
+	m.HandleFunc("DELETE /api/v1/links/{token}", s.auth(s.handleRevokeLink))
+
+	// Public: the page behind a link, without an account.
+	m.HandleFunc("GET /s/{token}", s.handleSharePage)
+	m.HandleFunc("GET /s/{token}/t/{id}/{size}", s.handleShareThumb)
+	m.HandleFunc("GET /s/{token}/f/{id}", s.handleShareFile)
 
 	m.HandleFunc("OPTIONS /api/v1/uploads", s.handleTusOptions)
 	m.HandleFunc("OPTIONS /api/v1/uploads/{id}", s.handleTusOptions)
@@ -166,6 +176,8 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			"source_sha256": true,
 			"albums":        true,
 			"shared_albums": true,
+			"direct_shares": true,
+			"links":         true,
 		},
 		"thumb_sizes": media.Sizes,
 	})
