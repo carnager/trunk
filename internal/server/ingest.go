@@ -297,7 +297,12 @@ var extFor = map[string]string{
 // receive streams body into a new file in the uploads directory, hashing it
 // on the way, and returns the file's path and hash.
 func (s *Server) receive(body io.Reader) (tmp, sum string, n int64, err error) {
-	f, err := os.CreateTemp(s.uploads, "simple-*")
+	return s.receiveAs("simple-", body)
+}
+
+// receiveAs is receive with a name prefix; the janitor's cleanup depends on it.
+func (s *Server) receiveAs(prefix string, body io.Reader) (tmp, sum string, n int64, err error) {
+	f, err := os.CreateTemp(s.uploads, prefix+"*")
 	if err != nil {
 		return "", "", 0, err
 	}

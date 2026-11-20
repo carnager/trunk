@@ -32,7 +32,7 @@ Usage:
   trunk user add NAME [-admin]     create an account (asks for a password)
   trunk user passwd NAME           set a new password
   trunk user list                  list accounts
-  trunk import takeout -user NAME [-dry-run] [-jobs N] ZIP|DIR...
+  trunk import takeout -user NAME [-dry-run] [-jobs N] ZIP|TGZ|DIR...
                                    import a Google Photos export from Google Takeout
   trunk version
 
@@ -285,7 +285,7 @@ func cmdImportTakeout(args []string) error {
 	data := dataFlag(fs)
 	user := fs.String("user", "", "account to import into (required)")
 	dry := fs.Bool("dry-run", false, "only show what would be imported")
-	jobs := fs.Int("jobs", min(4, runtime.NumCPU()), "files to import at once")
+	jobs := fs.Int("jobs", min(8, max(2, runtime.NumCPU()/2)), "files to import at once")
 	// Allow flags after the inputs too: trunk import takeout *.zip -user alice
 	var inputs []string
 	rest := args
@@ -298,10 +298,10 @@ func cmdImportTakeout(args []string) error {
 		rest = fs.Args()[1:]
 	}
 	if *user == "" || len(inputs) == 0 {
-		return errors.New("usage: trunk import takeout -user NAME [-dry-run] [-jobs N] ZIP|DIR...")
+		return errors.New("usage: trunk import takeout -user NAME [-dry-run] [-jobs N] ZIP|TGZ|DIR...")
 	}
 
-	entries, closer, err := takeout.Sources(inputs)
+	entries, closer, err := takeout.Sources(inputs, os.Stdout)
 	if err != nil {
 		return err
 	}

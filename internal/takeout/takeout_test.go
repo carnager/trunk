@@ -120,6 +120,10 @@ func TestNewPlan(t *testing.T) {
 	if len(p.Albums) != 1 || p.Albums[0].Name != "Urlaub am Meer" || len(p.Albums[0].Items) != 1 {
 		t.Errorf("albums: %+v", p.Albums)
 	}
+	// The album's copy has no sidecar of its own but is the same file as the year folder's.
+	if p.Albums[0].Items[0].Sidecar == nil || !p.Albums[0].Items[0].Sidecar.Favorited {
+		t.Error("album copy did not get its twin's sidecar")
+	}
 	if len(p.Skipped) != 3 {
 		t.Errorf("skipped: %v", p.Skipped)
 	}

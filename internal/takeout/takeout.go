@@ -1,6 +1,6 @@
 // Package takeout imports a Google Photos export from Google Takeout.
 //
-// A Takeout is one or more zip files (or their unpacked folders) holding
+// A Takeout is one or more zip or tgz files (or their unpacked folders) holding
 // "Takeout/Google Photos/<folder>/". Year folders ("Photos from 2023", "Fotos
 // von 2023") hold everything; album folders hold copies of the album's photos
 // plus a JSON file with the album title. Next to most photos sits a JSON
@@ -15,7 +15,10 @@
 package takeout
 
 import (
+	"archive/tar"
 	"archive/zip"
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,25 +31,35 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/klauspost/compress/gzip"
 )
 
-// Entry is one file of the export, from a folder or inside a zip.
+// Entry is one file of the export, from a folder, a zip or a tar archive.
 type Entry struct {
 	Path string // slash-separated, relative to the export root
 	Size int64
+	// Open reads the file. It is nil for media inside a tar archive (.tgz),
+	// which can only be read front to back: Run streams those instead.
 	Open func() (io.ReadCloser, error)
+
+	archive *tarArchive
 }
 
-// Sources reads the given zip files and folders. Close the returned closer
-// when done.
-func Sources(inputs []string) ([]Entry, io.Closer, error) {
+// Sources reads the given folders, zip files and tar archives (.tgz, .tar).
+// Tar archives are read through once here to list them, keeping only the
+// small JSON files; progress goes to log. Close the returned closer when done.
+func Sources(inputs []string, log io.Writer) ([]Entry, io.Closer, error) {
 	var entries []Entry
 	var zips multiCloser
+	fail := func(err error) ([]Entry, io.Closer, error) {
+		zips.Close()
+		return nil, nil, err
+	}
 	for _, in := range inputs {
 		st, err := os.Stat(in)
 		if err != nil {
-			zips.Close()
-			return nil, nil, err
+			return fail(err)
 		}
 		if st.IsDir() {
 			err := filepath.WalkDir(in, func(p string, d fs.DirEntry, err error) error {
@@ -66,25 +79,121 @@ func Sources(inputs []string) ([]Entry, io.Closer, error) {
 				return nil
 			})
 			if err != nil {
-				zips.Close()
-				return nil, nil, err
+				return fail(err)
 			}
 			continue
 		}
-		z, err := zip.OpenReader(in)
+		kind, err := sniffArchive(in)
 		if err != nil {
-			zips.Close()
-			return nil, nil, fmt.Errorf("%s: %w", in, err)
+			return fail(err)
 		}
-		zips = append(zips, z)
-		for _, f := range z.File {
-			if f.FileInfo().IsDir() {
-				continue
+		if kind == "zip" {
+			z, err := zip.OpenReader(in)
+			if err != nil {
+				return fail(fmt.Errorf("%s: %w", in, err))
 			}
-			entries = append(entries, Entry{Path: f.Name, Size: int64(f.UncompressedSize64), Open: f.Open})
+			zips = append(zips, z)
+			for _, f := range z.File {
+				if !f.FileInfo().IsDir() {
+					entries = append(entries, Entry{Path: f.Name, Size: int64(f.UncompressedSize64), Open: f.Open})
+				}
+			}
+			continue
 		}
+		a := &tarArchive{path: in, gzip: kind == "tgz"}
+		list, err := a.index(log)
+		if err != nil {
+			return fail(fmt.Errorf("%s: %w", in, err))
+		}
+		entries = append(entries, list...)
 	}
 	return entries, zips, nil
+}
+
+func sniffArchive(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(f, head)
+	head = head[:n]
+	switch {
+	case bytes.HasPrefix(head, []byte("PK\x03\x04")):
+		return "zip", nil
+	case bytes.HasPrefix(head, []byte{0x1f, 0x8b}):
+		return "tgz", nil
+	case len(head) >= 262 && string(head[257:262]) == "ustar":
+		return "tar", nil
+	}
+	return "", fmt.Errorf("%s: not a folder, zip or tgz", path)
+}
+
+// tarArchive is a .tgz or .tar export, read front to back.
+type tarArchive struct {
+	path string
+	gzip bool
+}
+
+// walk calls fn for each regular file, with a reader for its content.
+func (a *tarArchive) walk(fn func(h *tar.Header, r io.Reader) error) error {
+	f, err := os.Open(a.path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	var r io.Reader = bufio.NewReaderSize(f, 1<<20)
+	if a.gzip {
+		zr, err := gzip.NewReader(r)
+		if err != nil {
+			return err
+		}
+		defer zr.Close()
+		r = zr
+	}
+	tr := tar.NewReader(r)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if h.Typeflag != tar.TypeReg {
+			continue
+		}
+		if err := fn(h, tr); err != nil {
+			return err
+		}
+	}
+}
+
+// index lists the archive, keeping the JSON files in memory so the plan can
+// read them without another pass.
+func (a *tarArchive) index(log io.Writer) ([]Entry, error) {
+	var list []Entry
+	var bytesSeen int64
+	last := time.Now()
+	err := a.walk(func(h *tar.Header, r io.Reader) error {
+		e := Entry{Path: h.Name, Size: h.Size, archive: a}
+		if strings.EqualFold(path.Ext(h.Name), ".json") && h.Size <= 1<<20 {
+			data, err := io.ReadAll(r)
+			if err != nil {
+				return err
+			}
+			e.Open = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(data)), nil }
+		}
+		list = append(list, e)
+		bytesSeen += h.Size
+		if time.Since(last) > 3*time.Second {
+			last = time.Now()
+			fmt.Fprintf(log, "  listing %s: %d files, %.1f GB\n", filepath.Base(a.path), len(list), float64(bytesSeen)/(1<<30))
+		}
+		return nil
+	})
+	return list, err
 }
 
 type multiCloser []io.Closer
@@ -260,7 +369,34 @@ func NewPlan(entries []Entry) *Plan {
 		}
 	}
 	p.Items = append(p.Items, edits...)
+	shareSidecars(p.Items)
 	return p
+}
+
+// shareSidecars gives copies without a sidecar the one of their twin. Album
+// folders hold byte-identical copies of photos in the year folders, not
+// always with a sidecar of their own; whichever copy is stored first must not
+// decide whether the photo gets Google's metadata. Same name and size is
+// taken as the same file.
+func shareSidecars(items []*Item) {
+	type key struct {
+		name string
+		size int64
+	}
+	known := map[key]*Sidecar{}
+	for _, it := range items {
+		if it.Sidecar != nil {
+			k := key{strings.ToLower(it.Name), it.Size}
+			if known[k] == nil {
+				known[k] = it.Sidecar
+			}
+		}
+	}
+	for _, it := range items {
+		if it.Sidecar == nil {
+			it.Sidecar = known[key{strings.ToLower(it.Name), it.Size}]
+		}
+	}
 }
 
 func readSidecar(e Entry) *Sidecar {

@@ -62,15 +62,16 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 		cfg.MaxUpload = 50 << 30
 	}
 	s := &Server{
-		cfg:        cfg,
-		log:        log,
-		originals:  filepath.Join(cfg.DataDir, "originals"),
-		thumbs:     filepath.Join(cfg.DataDir, "thumbs"),
-		uploads:    filepath.Join(cfg.DataDir, "uploads"),
-		limit:      limiter{fail: map[string][]time.Time{}},
-		seen:       map[int64]time.Time{},
-		thumbQ:     make(chan int64, 4096),
-		thumbSem:   make(chan struct{}, min(4, max(1, runtime.NumCPU()))),
+		cfg:       cfg,
+		log:       log,
+		originals: filepath.Join(cfg.DataDir, "originals"),
+		thumbs:    filepath.Join(cfg.DataDir, "thumbs"),
+		uploads:   filepath.Join(cfg.DataDir, "uploads"),
+		limit:     limiter{fail: map[string][]time.Time{}},
+		seen:      map[int64]time.Time{},
+		thumbQ:    make(chan int64, 4096),
+		// Each render holds a decoded original (about 50 MB for 12 MP), so not one per core.
+		thumbSem:   make(chan struct{}, min(8, max(1, runtime.NumCPU()/2))),
 		thumbLock:  map[string]*refMutex{},
 		thumbFail:  map[string]time.Time{},
 		uploadBusy: map[string]bool{},

@@ -35,13 +35,17 @@ data/
 
 ### Moving from Google Photos
 
-Ask [Google Takeout](https://takeout.google.com) for Google Photos only, as .zip files, and point
-trunk at them; no need to unpack:
+Ask [Google Takeout](https://takeout.google.com) for Google Photos only, as .zip or .tgz files,
+and point trunk at them; no need to unpack:
 
 ```sh
-./trunk import takeout ~/Downloads/takeout-*.zip -user alice -dry-run   # see what it will do
-./trunk import takeout ~/Downloads/takeout-*.zip -user alice
+./trunk import takeout ~/Downloads/takeout-*.tgz -user alice -dry-run   # see what it will do
+./trunk import takeout ~/Downloads/takeout-*.tgz -user alice
 ```
+
+A .tgz can only be read front to back, so trunk reads each one twice: once to list it and collect
+Google's metadata, once to import. Files are unpacked straight into the data directory, so the
+disk needs room for the photos, not for another copy of the export.
 
 It can run while the server is up. Dates and places come from the photos themselves and, where
 they lack them, from Google's JSON files (which also give photos without an offset their time

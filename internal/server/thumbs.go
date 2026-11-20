@@ -210,12 +210,17 @@ func (s *Server) sweep(ctx context.Context) {
 		s.dropUpload(id)
 	}
 	// Leftovers from simple uploads cut off mid-request or a crash mid-ingest.
+	// An import may hold files for as long as it runs, which can be days.
 	entries, _ := os.ReadDir(s.uploads)
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), "tus-") && !strings.HasSuffix(e.Name(), ".ingest") {
 			continue
 		}
-		if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) > 24*time.Hour {
+		maxAge := 24 * time.Hour
+		if strings.HasPrefix(e.Name(), "import-") {
+			maxAge = 7 * 24 * time.Hour
+		}
+		if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) > maxAge {
 			os.Remove(filepath.Join(s.uploads, e.Name()))
 		}
 	}

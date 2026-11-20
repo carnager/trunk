@@ -6,6 +6,7 @@ require (
 	github.com/evanoberholster/imagemeta v1.1.0
 	github.com/gen2brain/avif v0.6.0
 	github.com/gen2brain/heic v0.7.2
+	github.com/klauspost/compress v1.20.4
 	golang.org/x/crypto v0.59.0
 	golang.org/x/image v0.48.0
 	golang.org/x/term v0.48.0

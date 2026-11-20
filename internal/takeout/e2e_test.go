@@ -1,8 +1,10 @@
 package takeout
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -16,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -60,6 +63,29 @@ func jpegBytes(t *testing.T, seed uint8, exifDate string) []byte {
 	return append(out, buf.Bytes()[2:]...)
 }
 
+// writeTgz writes the files in sorted order, which puts "IMG_A-bearbeitet.jpg"
+// before "IMG_A.jpg": an edit that arrives before its original.
+func writeTgz(t *testing.T, path string, files map[string][]byte) {
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := gzip.NewWriter(f)
+	tw := tar.NewWriter(zw)
+	names := make([]string, 0, len(files))
+	for n := range files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		tw.WriteHeader(&tar.Header{Name: n, Mode: 0o644, Size: int64(len(files[n])), Typeflag: tar.TypeReg})
+		tw.Write(files[n])
+	}
+	tw.Close()
+	zw.Close()
+	f.Close()
+}
+
 func writeZip(t *testing.T, path string, files map[string][]byte) {
 	f, err := os.Create(path)
 	if err != nil {
@@ -85,13 +111,23 @@ func sidecarJSON(title string, ts int64, lat, lon float64, fav bool) []byte {
 }
 
 func TestImportEndToEnd(t *testing.T) {
+	t.Run("zip", func(t *testing.T) { testImport(t, "zip") })
+	t.Run("tgz", func(t *testing.T) { testImport(t, "tgz") })
+}
+
+func testImport(t *testing.T, format string) {
 	dir := t.TempDir()
 	a := jpegBytes(t, 1, "2023:07:17 16:00:00") // local time, offset not in the file
 	aEdit := jpegBytes(t, 2, "")
 	pxl := jpegBytes(t, 3, "")
 	scan := jpegBytes(t, 4, "")
 	gp := "Takeout/Google Photos/"
-	writeZip(t, filepath.Join(dir, "takeout-001.zip"), map[string][]byte{
+	write := writeZip
+	if format == "tgz" {
+		write = writeTgz
+	}
+	in1, in2 := filepath.Join(dir, "takeout-001."+format), filepath.Join(dir, "takeout-002."+format)
+	write(t, in1, map[string][]byte{
 		gp + "Photos from 2023/IMG_A.jpg":                            a,
 		gp + "Photos from 2023/IMG_A.jpg.supplemental-metadata.json": sidecarJSON("IMG_A.jpg", 1689602400, 52.52, 13.405, true), // 14:00Z
 		gp + "Photos from 2023/IMG_A-bearbeitet.jpg":                 aEdit,
@@ -104,7 +140,7 @@ func TestImportEndToEnd(t *testing.T) {
 		"Takeout/archive_browser.html":                               []byte("<html>"),
 	})
 	// The album's title travels in another zip than its photos.
-	writeZip(t, filepath.Join(dir, "takeout-002.zip"), map[string][]byte{
+	write(t, in2, map[string][]byte{
 		gp + "Urlaub/metadata.json": []byte(`{"title": "Urlaub an der Ostsee"}`),
 	})
 
@@ -117,7 +153,7 @@ func TestImportEndToEnd(t *testing.T) {
 	srv.DB().Exec(`INSERT INTO users (name, pw_hash, created_at) VALUES ('alice', ?, 0)`, h)
 
 	run := func() Result {
-		entries, closer, err := Sources([]string{filepath.Join(dir, "takeout-001.zip"), filepath.Join(dir, "takeout-002.zip")})
+		entries, closer, err := Sources([]string{in1, in2}, io.Discard)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -131,6 +167,9 @@ func TestImportEndToEnd(t *testing.T) {
 	res := run()
 	if res.Added != 3 || res.Existing != 2 || res.Edits != 1 || res.Failed != 0 || res.AlbumsCreated != 1 {
 		t.Fatalf("first run: %+v", res)
+	}
+	if left, _ := os.ReadDir(filepath.Join(dir, "data", "uploads")); len(left) != 0 {
+		t.Errorf("spooled files left behind: %v", left)
 	}
 
 	ts := httptest.NewServer(srv.Handler())
@@ -173,7 +212,7 @@ func TestImportEndToEnd(t *testing.T) {
 	}
 	p := assets["PXL_20230801_101500000.jpg"]
 	if p.TZOffset == nil || *p.TZOffset != 120 || p.LocalTime != "2023-08-01T10:15:00" || p.Lat != nil {
-		t.Errorf("PXL: offset %v local %s taken %v lat %v", *p.TZOffset, p.LocalTime, p.TakenAt, p.Lat)
+		t.Errorf("PXL: offset %v local %s taken %v lat %v", p.TZOffset, p.LocalTime, p.TakenAt, p.Lat)
 	}
 	sc := assets["scan.jpg"]
 	if sc.TakenAt == nil || sc.TakenAt.Unix() != 1000000000 || sc.TZOffset != nil {
