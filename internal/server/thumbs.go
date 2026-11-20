@@ -150,12 +150,14 @@ func (s *Server) removeThumbsIfUnused(ctx context.Context, sha string) {
 	}
 }
 
-// janitor empties expired trash and abandoned uploads once an hour.
+// janitor empties expired trash and abandoned uploads and keeps the daily
+// database backup, once an hour.
 func (s *Server) janitor(ctx context.Context) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
 		s.sweep(ctx)
+		s.dailyBackup(ctx)
 		select {
 		case <-ctx.Done():
 			return

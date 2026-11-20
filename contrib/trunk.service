@@ -1,0 +1,41 @@
+# trunk as a system service. Install:
+#   sudo useradd --system --home-dir /var/lib/trunk --create-home trunk
+#   sudo install -m 755 trunk /usr/local/bin/trunk
+#   sudo cp contrib/trunk.service /etc/systemd/system/
+#   sudo -u trunk trunk user add NAME -admin -data /var/lib/trunk    # in a terminal: asks for a password
+#   sudo systemctl enable --now trunk
+#
+# To move an existing library: stop trunk, copy the whole data directory to
+# /var/lib/trunk, chown -R trunk:trunk /var/lib/trunk, start.
+
+[Unit]
+Description=trunk photo server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=trunk
+Group=trunk
+# Behind Caddy on the same machine: only reachable through it, which sets X-Forwarded-For.
+ExecStart=/usr/local/bin/trunk serve -data /var/lib/trunk -listen 127.0.0.1:8420 -trust-proxy
+Restart=on-failure
+RestartSec=5
+
+# Hardening: trunk needs its data directory and nothing else.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/trunk
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

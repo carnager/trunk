@@ -39,6 +39,9 @@ Usage:
   trunk user list                  list accounts
   trunk import takeout -user NAME [-dry-run] [-jobs N] ZIP|TGZ|DIR...
                                    import a Google Photos export from Google Takeout
+  trunk backup FILE                a consistent copy of the database, also while trunk runs
+  trunk verify [-hash] [-thumbs]   check that every file is there and intact
+  trunk reindex                    take files in originals/ that the database lacks into it
   trunk version
 
 Every command takes -data DIR (default $TRUNK_DATA or ./data).
@@ -63,6 +66,12 @@ func main() {
 			os.Exit(2)
 		}
 		err = cmdImportTakeout(os.Args[3:])
+	case "backup":
+		err = cmdBackup(os.Args[2:])
+	case "verify":
+		err = cmdVerify(os.Args[2:])
+	case "reindex":
+		err = cmdReindex(os.Args[2:])
 	case "version", "-version", "--version":
 		fmt.Println("trunk", version)
 	case "help", "-h", "-help", "--help":
@@ -388,6 +397,114 @@ func cmdImportTakeout(args []string) error {
 	}
 	if res.Failed > 0 {
 		return fmt.Errorf("%d files failed", res.Failed)
+	}
+	return nil
+}
+
+// openData opens the data directory for a command line tool.
+func openData(fs *flag.FlagSet, args []string) (*server.Server, []string, error) {
+	data := dataFlag(fs)
+	var pos []string
+	rest := args
+	for {
+		fs.Parse(rest)
+		if fs.NArg() == 0 {
+			break
+		}
+		pos = append(pos, fs.Arg(0))
+		rest = fs.Args()[1:]
+	}
+	srv, err := server.New(server.Config{DataDir: *data}, slog.New(slog.DiscardHandler))
+	return srv, pos, err
+}
+
+func cmdBackup(args []string) error {
+	srv, pos, err := openData(flag.NewFlagSet("backup", flag.ExitOnError), args)
+	if err != nil {
+		return err
+	}
+	defer srv.Close()
+	if len(pos) != 1 {
+		return errors.New("usage: trunk backup FILE")
+	}
+	if err := srv.Backup(context.Background(), pos[0]); err != nil {
+		return err
+	}
+	st, _ := os.Stat(pos[0])
+	fmt.Printf("database copied to %s (%.1f MB)\n", pos[0], float64(st.Size())/(1<<20))
+	fmt.Println("the photos themselves are the files in originals/; back those up as they are")
+	return nil
+}
+
+func cmdVerify(args []string) error {
+	fs := flag.NewFlagSet("verify", flag.ExitOnError)
+	hash := fs.Bool("hash", false, "read every file and compare its SHA-256 (reads the whole library)")
+	thumbs := fs.Bool("thumbs", false, "render missing thumbnails")
+	srv, _, err := openData(fs, args)
+	if err != nil {
+		return err
+	}
+	defer srv.Close()
+	start := time.Now()
+	last := time.Now()
+	problems, err := srv.Verify(context.Background(), server.VerifyOptions{
+		Hash: *hash, Thumbs: *thumbs,
+		Progress: func(done, total int) {
+			if time.Since(last) > 3*time.Second {
+				last = time.Now()
+				fmt.Printf("  %d / %d files\n", done, total)
+			}
+		},
+	})
+	if err != nil {
+		return err
+	}
+	count := map[string]int{}
+	for _, p := range problems {
+		count[p.Kind]++
+		if count[p.Kind] <= 20 {
+			fmt.Printf("%-8s %s: %s\n", p.Kind, p.Path, p.Detail)
+		} else if count[p.Kind] == 21 {
+			fmt.Printf("%-8s … more\n", p.Kind)
+		}
+	}
+	how := "sizes"
+	if *hash {
+		how = "contents"
+	}
+	if len(problems) == 0 {
+		fmt.Printf("all files there, %s as expected (%s)\n", how, time.Since(start).Round(time.Second))
+		return nil
+	}
+	var parts []string
+	for _, k := range []string{"missing", "size", "hash", "unknown", "thumbs"} {
+		if count[k] > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", count[k], k))
+		}
+	}
+	fmt.Printf("checked %s: %s\n", how, strings.Join(parts, ", "))
+	if count["unknown"] > 0 {
+		fmt.Println("unknown files can be taken in with: trunk reindex")
+	}
+	if count["missing"]+count["size"]+count["hash"] > 0 {
+		return errors.New("files are missing or damaged; restore them from a backup")
+	}
+	return nil
+}
+
+func cmdReindex(args []string) error {
+	srv, _, err := openData(flag.NewFlagSet("reindex", flag.ExitOnError), args)
+	if err != nil {
+		return err
+	}
+	defer srv.Close()
+	res, err := srv.Reindex(context.Background(), func(p string) { fmt.Println("  + " + p) })
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%d taken in, %d left out as duplicates of known photos, %d skipped\n", res.Added, res.Duplicate, len(res.Skipped))
+	for _, s := range res.Skipped {
+		fmt.Println("  skipped " + s)
 	}
 	return nil
 }

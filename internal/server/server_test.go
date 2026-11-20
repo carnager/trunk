@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -1245,5 +1247,128 @@ func TestPublicLinks(t *testing.T) {
 	}
 	if c, _ := page("/s/nonsense"); c != 404 {
 		t.Errorf("unknown link: %d", c)
+	}
+}
+
+func TestMaintenance(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	tok := e.login("alice", "phone")
+	a := e.upload(tok, "IMG_20230105_101112.jpg", testJPEG(t, 64, 48, 91, true), 201)
+	b := e.upload(tok, "b.jpg", testJPEG(t, 64, 48, 92, false), 201)
+	c := e.upload(tok, "c.jpg", testJPEG(t, 64, 48, 93, false), 201)
+	res := e.do("PUT", fmt.Sprintf("/api/v1/assets/%d/edit", c.ID), tok, bytes.NewReader(testJPEG(t, 40, 40, 94, false)), nil)
+	if res.StatusCode != 200 {
+		t.Fatalf("edit: %d", res.StatusCode)
+	}
+
+	// Backup: a consistent copy, also while the server runs.
+	dir := t.TempDir()
+	if err := e.srv.Backup(ctx, filepath.Join(dir, "copy.db")); err != nil {
+		t.Fatal(err)
+	}
+	copyDB, _ := sql.Open("sqlite", filepath.Join(dir, "copy.db"))
+	var n int
+	copyDB.QueryRow(`SELECT COUNT(*) FROM assets`).Scan(&n)
+	copyDB.Close()
+	if n != 3 {
+		t.Errorf("backup has %d assets", n)
+	}
+	if err := e.srv.Backup(ctx, filepath.Join(dir, "copy.db")); err == nil {
+		t.Error("backup overwrote an existing file")
+	}
+	backups := filepath.Join(e.srv.cfg.DataDir, "backups")
+	os.MkdirAll(backups, 0o755)
+	for i := 1; i <= 9; i++ {
+		os.WriteFile(filepath.Join(backups, fmt.Sprintf("trunk-2020-01-0%d.db", i)), nil, 0o644)
+	}
+	e.srv.dailyBackup(ctx)
+	e.srv.dailyBackup(ctx) // once a day
+	kept, _ := filepath.Glob(filepath.Join(backups, "trunk-*.db"))
+	if len(kept) != keepBackups || !strings.Contains(kept[len(kept)-1], time.Now().Format("2006-01-02")) {
+		t.Errorf("backups kept: %v", kept)
+	}
+
+	// Verify: all well, then damage.
+	if p, err := e.srv.Verify(ctx, VerifyOptions{Hash: true}); err != nil || len(p) != 0 {
+		t.Fatalf("clean library: %v %+v", err, p)
+	}
+	orig := func(as Asset) string {
+		var rel string
+		e.srv.db.QueryRow(`SELECT path FROM assets WHERE id = ?`, as.ID).Scan(&rel)
+		return filepath.Join(e.srv.originals, filepath.FromSlash(rel))
+	}
+	flipped, _ := os.ReadFile(orig(a))
+	flipped[len(flipped)/2] ^= 0xff
+	os.WriteFile(orig(a), flipped, 0o644)
+	os.Truncate(orig(b), 10)
+	var firstOfEdit string
+	e.srv.db.QueryRow(`SELECT orig_path FROM assets WHERE id = ?`, c.ID).Scan(&firstOfEdit)
+	os.Remove(filepath.Join(e.srv.originals, filepath.FromSlash(firstOfEdit)))
+	os.WriteFile(filepath.Join(e.srv.originals, "alice", "stray.jpg"), testJPEG(t, 20, 20, 95, false), 0o644)
+
+	kinds := func(p []Problem) string {
+		var k []string
+		for _, x := range p {
+			k = append(k, x.Kind)
+		}
+		sort.Strings(k)
+		return strings.Join(k, " ")
+	}
+	p, _ := e.srv.Verify(ctx, VerifyOptions{})
+	if kinds(p) != "missing size unknown" {
+		t.Errorf("quick verify: %s", kinds(p))
+	}
+	p, _ = e.srv.Verify(ctx, VerifyOptions{Hash: true})
+	if kinds(p) != "hash missing size unknown" {
+		t.Errorf("full verify: %s", kinds(p))
+	}
+
+	// Reindex: the database is gone, the files are not.
+	data2 := t.TempDir()
+	if err := os.CopyFS(filepath.Join(data2, "originals"), os.DirFS(e.srv.originals)); err != nil {
+		t.Fatal(err)
+	}
+	srv2, err := New(Config{DataDir: data2}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv2.Close()
+	srv2.db.Exec(`INSERT INTO users (name, pw_hash, created_at) VALUES ('alice', 'x', 0)`)
+	os.MkdirAll(filepath.Join(data2, "originals", "carol"), 0o755)
+	os.WriteFile(filepath.Join(data2, "originals", "carol", "x.jpg"), testJPEG(t, 20, 20, 96, false), 0o644)
+	r, err := srv2.Reindex(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a (damaged), b's stub (still starts like a JPEG: taken in, damaged), c's edit, the stray file;
+	// carol has no account.
+	if r.Added != 4 || len(r.Skipped) != 1 {
+		t.Errorf("reindex: %+v", r)
+	}
+	var taken int64
+	srv2.db.QueryRow(`SELECT taken_at FROM assets WHERE orig_name = 'IMG_20230105_101112.jpg'`).Scan(&taken)
+	if time.UnixMilli(taken).UTC().Year() != 2024 { // from EXIF, not from the name or the file
+		t.Errorf("reindexed date: %v", time.UnixMilli(taken).UTC())
+	}
+	again, _ := srv2.Reindex(ctx, nil)
+	if again.Added != 0 {
+		t.Errorf("second reindex added %d", again.Added)
+	}
+	if p, _ := srv2.Verify(ctx, VerifyOptions{}); len(p) != 1 || p[0].Path != "carol/x.jpg" { // only what reindex could not place
+		t.Errorf("after reindex: %+v", p)
+	}
+
+	// originals/ as a symlink to another disk works the same.
+	data3 := t.TempDir()
+	os.Symlink(filepath.Join(data2, "originals"), filepath.Join(data3, "originals"))
+	srv2.Backup(ctx, filepath.Join(data3, "trunk.db"))
+	srv3, err := New(Config{DataDir: data3}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv3.Close()
+	if p, _ := srv3.Verify(ctx, VerifyOptions{}); len(p) != 1 || p[0].Path != "carol/x.jpg" {
+		t.Errorf("verify through a symlink: %+v", p)
 	}
 }

@@ -1,0 +1,8 @@
+# trunk behind Caddy: HTTPS with a certificate Caddy fetches itself.
+# Point the DNS name at the machine, then give peek https://photos.example.org.
+# Caddy sets no upload size limit and no proxy timeouts by default, so big
+# video uploads and long streams need nothing extra.
+photos.example.org {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8420
+}

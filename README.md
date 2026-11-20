@@ -58,13 +58,42 @@ The originals tree is the source of truth and stays readable without trunk. Back
 
 The API is described in [docs/api.md](docs/api.md).
 
+## Running it for real
+
+`contrib/trunk.service` runs trunk as a hardened systemd service under its own user, with the data
+in `/var/lib/trunk`; `contrib/Caddyfile` puts it behind Caddy with HTTPS. Instructions are in both
+files. Public links use the address peek is connected with, so connect peek through the public
+name (`https://photos.example.org`), not the LAN address, for links that work anywhere.
+
+### Backups
+
+Back up the data directory with whatever you use (restic, borg, rsync). What matters in it:
+
+- `originals/`: your photos and videos, as plain files. Losing these is losing photos.
+- `backups/`: trunk copies its database there once a day (the last 7), consistently, so a backup
+  taken while trunk is writing still has a usable database. The database holds what is not in the
+  files: albums, captions, favourites, sharing, links, accounts.
+
+`thumbs/` can be left out: trunk renders thumbnails again when they are missing.
+
+```sh
+trunk backup /mnt/backup/trunk.db     # a consistent database copy by hand, also while trunk runs
+trunk verify                          # every file there and of the right size
+trunk verify -hash                    # … and unchanged: reads the whole library
+```
+
+Restoring: put `originals/` back, copy the newest `backups/trunk-*.db` to `trunk.db`, start
+trunk, run `trunk verify`. If the database is lost altogether, `trunk reindex` takes the files in
+`originals/` back in where they are, with date, place and camera; the accounts have to be created
+again first (`trunk user add`), with the same names as the folders in `originals/`.
+
 ## Status
 
 Done: accounts and per-device tokens, simple and resumable (tus) upload with SHA-256
 deduplication, metadata (EXIF, QuickTime, file names), thumbnails and video posters, delta sync,
 favourites, trash with expiry, edits that keep the first upload, albums, Google Takeout import,
 place names and captions, albums shared within the household, photos sent directly to someone,
-public links with a small web page.
+public links with a small web page, daily database backups, `verify` and `reindex`.
 
 Places: photos with GPS get the nearest town, region and country, offline, from
 [GeoNames](https://www.geonames.org) data (CC BY 4.0) built into the binary
