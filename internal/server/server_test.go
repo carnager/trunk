@@ -1978,3 +1978,40 @@ func TestPeople(t *testing.T) {
 		t.Error("hidden not kept")
 	}
 }
+
+func TestWebClient(t *testing.T) {
+	e := newEnv(t)
+	alice := e.login("alice", "browser")
+	a := e.upload(alice, "a.jpg", testJPEG(t, 64, 48, 180, false), 201)
+
+	res := e.do("GET", "/", "", nil, nil)
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != 200 || !strings.Contains(string(body), "/app/app.js") || !strings.Contains(res.Header.Get("Content-Security-Policy"), "script-src 'self'") {
+		t.Fatalf("index: %d %q", res.StatusCode, res.Header.Get("Content-Security-Policy"))
+	}
+	for _, f := range []string{"/app/app.js", "/app/app.css", "/app/icon.svg"} {
+		if res := e.do("GET", f, "", nil, nil); res.StatusCode != 200 {
+			t.Errorf("%s: %d", f, res.StatusCode)
+		}
+	}
+	if res := e.do("GET", "/app/../server.go", "", nil, nil); res.StatusCode == 200 {
+		t.Error("served something outside the web client")
+	}
+
+	// The cookie is enough to read (pictures, videos) …
+	cookie := map[string]string{"Cookie": "trunk_token=" + alice}
+	if res := e.do("GET", fmt.Sprintf("/api/v1/assets/%d/thumb/small", a.ID), "", nil, cookie); res.StatusCode != 200 {
+		t.Errorf("thumb with cookie: %d", res.StatusCode)
+	}
+	// … but not to change anything: that needs the header, which another site cannot set.
+	req := map[string]string{"Cookie": "trunk_token=" + alice, "Content-Type": "application/json"}
+	if res := e.do("POST", "/api/v1/assets/trash", "", strings.NewReader(fmt.Sprintf(`{"ids":[%d]}`, a.ID)), req); res.StatusCode != 401 {
+		t.Errorf("trash with only a cookie: %d", res.StatusCode)
+	}
+	if res := e.do("PATCH", fmt.Sprintf("/api/v1/assets/%d", a.ID), "", strings.NewReader(`{"favorite":true}`), req); res.StatusCode != 401 {
+		t.Errorf("patch with only a cookie: %d", res.StatusCode)
+	}
+	if res := e.do("GET", "/api/v1/me", "", nil, map[string]string{"Cookie": "trunk_token=nonsense"}); res.StatusCode != 401 {
+		t.Errorf("bad cookie: %d", res.StatusCode)
+	}
+}

@@ -120,6 +120,8 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/v1/server", s.handleServerInfo)
 	m.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	m.HandleFunc("POST /api/v1/auth/logout", s.auth(s.handleLogout))
+	m.HandleFunc("GET /{$}", s.handleWebIndex)
+	m.HandleFunc("GET /app/", s.handleWebFile)
 	m.HandleFunc("GET /api/v1/me", s.auth(s.handleMe))
 	m.HandleFunc("GET /api/v1/devices", s.auth(s.handleDevices))
 	m.HandleFunc("DELETE /api/v1/devices/{id}", s.auth(s.handleRevokeDevice))

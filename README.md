@@ -64,6 +64,14 @@ The originals tree is the source of truth and stays readable without trunk. Back
 
 The API is described in [docs/api.md](docs/api.md).
 
+## Web client
+
+trunk serves a web client at its address: the library with search, albums, people, favourites
+and trash, a viewer with details, selecting, deleting and adding to albums, and uploading by drag
+and drop. Plain HTML, CSS and JavaScript in `internal/server/web/app`, no build step, nothing
+loaded from elsewhere. Content search (by what is in the photos) is the phone app's for now: it
+needs the text model, which runs on the phone.
+
 ## Content search
 
 Searching by what is in the photos ("Hund am Strand") needs vectors that a model computes, and

@@ -95,6 +95,15 @@ func sessionFrom(r *http.Request) *Session {
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		// The web client: <img> and <video> cannot send a header, so reading
+		// also works with the token in a cookie. Only reading: anything that
+		// changes needs the header, so another site cannot make a browser do
+		// it (no cross-site request forgery).
+		if !ok && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			if c, err := r.Cookie(webCookie); err == nil && c.Value != "" {
+				tok, ok = c.Value, true
+			}
+		}
 		if !ok || tok == "" {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="trunk"`)
 			httpError(w, http.StatusUnauthorized, "missing token")

@@ -7,6 +7,13 @@ client addresses.
 Errors are `{"error": "message"}` with a fitting status code. Times are RFC 3339 in UTC. IDs are
 integers.
 
+## Web client
+
+`GET /` is trunk's own web client (`/app/…` its files), with a strict Content-Security-Policy. It
+uses this API with the token in the `Authorization` header like any client; for `<img>` and
+`<video>`, which cannot send headers, trunk also takes the token from a `trunk_token` cookie,
+for GET and HEAD only, so another site cannot make a browser change anything.
+
 ## Auth
 
 Each device logs in once and keeps its token. Tokens never expire; they are revoked one at a time.
