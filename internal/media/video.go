@@ -147,24 +147,33 @@ func videoFrame(path string, durationMS int64, max int) (image.Image, error) {
 	defer cancel()
 	// Fit inside max×max but never upscale small clips.
 	scale := fmt.Sprintf("scale=w='min(iw,%d)':h='min(ih,%d)':force_original_aspect_ratio=decrease", max, max)
-	cmd := exec.CommandContext(ctx, ffmpegBin, "-v", "error", "-ss", strconv.FormatFloat(at, 'f', 3, 64),
-		"-i", path, "-frames:v", "1", "-vf", scale, "-f", "image2", "-c:v", "png", "pipe:1")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil || len(out) == 0 {
-		if at > 0 {
-			// Seeking past the end of very short clips yields nothing; retry at 0.
-			cmd = exec.CommandContext(ctx, ffmpegBin, "-v", "error", "-i", path,
-				"-frames:v", "1", "-vf", scale, "-f", "image2", "-c:v", "png", "pipe:1")
-			out, err = cmd.Output()
+	seek := []string{"-ss", strconv.FormatFloat(at, 'f', 3, 64)}
+	first := []string{"-map", "0:v:0"}
+	// The first video stream is the clip. ffmpeg on its own picks the largest,
+	// which in Pixel motion photos exported as MP4 is a still without usable
+	// frames. Seeking past the end of very short clips yields nothing, hence
+	// the attempts from the start; ffmpeg's own choice comes last.
+	var errs []string
+	for _, try := range [][]string{append(seek, first...), first, nil} {
+		args := []string{"-v", "error"}
+		if len(try) > 0 && try[0] == "-ss" {
+			args = append(args, try[:2]...)
+			try = try[2:]
 		}
-		if err != nil || len(out) == 0 {
-			return nil, fmt.Errorf("ffmpeg: %v %s", err, strings.TrimSpace(stderr.String()))
+		args = append(args, "-i", path)
+		args = append(args, try...)
+		args = append(args, "-frames:v", "1", "-vf", scale, "-f", "image2", "-c:v", "png", "pipe:1")
+		cmd := exec.CommandContext(ctx, ffmpegBin, args...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err == nil && len(out) > 0 {
+			img, _, err := image.Decode(bytes.NewReader(out))
+			return img, err
 		}
+		errs = append(errs, fmt.Sprintf("%v %s", err, strings.TrimSpace(stderr.String())))
 	}
-	img, _, err := image.Decode(bytes.NewReader(out))
-	return img, err
+	return nil, fmt.Errorf("ffmpeg found no frame: %s", strings.Join(errs, "; "))
 }
 
 func lowerKeys(m map[string]string) map[string]string {
