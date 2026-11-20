@@ -1,0 +1,3 @@
+Righteous (c) 2011 Astigmatic (AOETI), and Bricolage Grotesque (c) 2022 The Bricolage Grotesque
+Project Authors (https://github.com/ateliertriay/bricolage). Both licensed under the SIL Open Font
+License, Version 1.1: https://openfontlicense.org. Only the Latin subsets are included here.

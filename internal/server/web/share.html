@@ -4,103 +4,182 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex">
+<meta name="theme-color" content="#120E2B">
 <title>{{if .Gone}}Link abgelaufen{{else}}{{.Title}}{{end}} · trunk</title>
 <style>
-  :root { --night: #241A5C; --violet: #5B3FD9; --sun: #FFC93C; --ink: #1E1B3A; --bg: #F6F4FC; --muted: #625C86; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #13102A; --ink: #EEEAFB; --muted: #A9A2CF; } }
+  @font-face { font-family: "Righteous"; src: url("/s/_/fonts/righteous-latin.woff2") format("woff2"); font-display: swap; }
+  @font-face { font-family: "Bricolage"; src: url("/s/_/fonts/bricolage-latin.woff2") format("woff2"); font-weight: 200 800; font-display: swap; }
+  :root {
+    --bg: #120E2B; --raised: #1C1640; --line: #2E2760; --fg: #F3EEFF; --muted: #A9A2CF;
+    --violet: #5B3FD9; --violet-soft: #8A73F2; --sun: #FFC93C; --ink: #1E1B3A;
+    --row: 240px; --gap: 6px;
+    --head: "Bricolage", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  /* Low enough on phones for two landscape photos to share a row. */
+  @media (max-width: 640px) { :root { --row: 118px; --gap: 3px; } }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { background: var(--night); color: #F3EEFF; padding: 28px max(16px, env(safe-area-inset-left)) 22px; }
-  header .brand { font-weight: 700; letter-spacing: .02em; opacity: .7; font-size: .85rem; }
-  header h1 { margin: 6px 0 2px; font-size: clamp(1.5rem, 1.1rem + 2vw, 2.2rem); line-height: 1.15; }
-  header p { margin: 0; opacity: .75; font-size: .95rem; }
-  main { padding: 12px max(12px, env(safe-area-inset-left)) 40px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
-  .grid button { position: relative; border: 0; padding: 0; aspect-ratio: 1; overflow: hidden; border-radius: 10px; cursor: zoom-in; background: #0002; }
-  .grid img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .grid .play { position: absolute; left: 8px; bottom: 6px; color: #fff; font-size: 20px; text-shadow: 0 1px 4px #000a; }
-  footer { text-align: center; color: var(--muted); font-size: .85rem; padding: 0 16px 32px; }
-  .gone { max-width: 34rem; margin: 15vh auto; text-align: center; padding: 0 16px; }
-  #box { position: fixed; inset: 0; background: #000; display: none; flex-direction: column; z-index: 10; }
-  #box.open { display: flex; }
-  #stage { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; touch-action: pan-y; }
-  #stage img, #stage video { max-width: 100%; max-height: 100%; object-fit: contain; }
-  #bar { color: #eee; padding: 10px 14px calc(12px + env(safe-area-inset-bottom)); display: flex; gap: 12px; align-items: center; background: #0008; }
-  #bar .text { flex: 1; min-width: 0; font-size: .95rem; }
-  #bar .text small { display: block; color: #bbb; }
-  #bar a, #bar button { color: #fff; background: #ffffff1f; border: 0; border-radius: 999px; padding: 8px 14px; font: inherit; text-decoration: none; cursor: pointer; }
-  .nav { position: fixed; top: 50%; transform: translateY(-50%); background: #0006; color: #fff; border: 0; width: 44px; height: 44px; border-radius: 50%; font-size: 22px; cursor: pointer; z-index: 11; }
-  #prev { left: 10px; } #next { right: 10px; } #close { position: fixed; top: 10px; right: 10px; z-index: 11; }
-  /* On touch screens swiping replaces the arrows; closing stays a button. */
-  @media (hover: none) { #prev, #next { display: none; } }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 var(--body); }
+  a { color: inherit; }
+
+  /* Top: the brand, then the title of what was shared. */
+  .top { display: flex; align-items: center; gap: 10px; padding: 18px max(20px, env(safe-area-inset-left)) 0; }
+  .top svg { width: 34px; height: auto; }
+  .word { font: 400 22px/1 "Righteous", var(--head); letter-spacing: .01em; color: var(--fg); opacity: .9; }
+  header { padding: 28px max(20px, env(safe-area-inset-left)) 26px; max-width: 1400px; }
+  h1 { font: 800 clamp(2rem, 1.4rem + 3vw, 3.4rem)/1.05 var(--head); letter-spacing: -.02em; margin: 0 0 12px; text-wrap: balance; }
+  .by { color: var(--muted); font-size: .98rem; margin: 0; }
+  .by b { color: var(--fg); font-weight: 600; }
+
+  /* Photos in rows at their own proportions: each grows by its width-to-height ratio. */
+  .gallery { display: flex; flex-wrap: wrap; gap: var(--gap); padding: 0 max(12px, env(safe-area-inset-left)) 8px; }
+  .gallery::after { content: ""; flex-grow: 1e9; }
+  /* A photo alone in a row may grow to twice its size, not to the full width. */
+  .tile { flex: var(--r) 1 calc(var(--r) * var(--row)); max-width: calc(var(--r) * var(--row) * 2); position: relative; border: 0; padding: 0; margin: 0; cursor: zoom-in;
+          border-radius: 8px; overflow: hidden; background: var(--raised); aspect-ratio: var(--r); min-width: 0; }
+  .tile img { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform .35s ease, opacity .4s ease; opacity: 0; }
+  .tile img.in { opacity: 1; }
+  @media (hover: hover) { .tile:hover img { transform: scale(1.035); } }
+  .tile:focus-visible { outline: 3px solid var(--sun); outline-offset: 2px; }
+  .badge { position: absolute; left: 8px; bottom: 8px; display: flex; align-items: center; gap: 4px; color: #fff; font: 600 12px/1 var(--body);
+           background: rgb(0 0 0 / .45); padding: 5px 8px 5px 6px; border-radius: 99px; backdrop-filter: blur(6px); }
+  .badge svg { width: 12px; height: 12px; }
+
+  footer { display: flex; justify-content: center; align-items: center; gap: 8px; color: var(--muted); font-size: .85rem; padding: 40px 16px calc(40px + env(safe-area-inset-bottom)); }
+  footer svg { width: 22px; height: auto; opacity: .8; }
+  footer .word { font-size: 15px; }
+
+  /* The full view. */
+  #box { position: fixed; inset: 0; z-index: 10; display: grid; grid-template-rows: auto 1fr auto; opacity: 0; pointer-events: none;
+         background: rgb(10 8 25 / .97); transition: opacity .2s ease; }
+  #box.open { opacity: 1; pointer-events: auto; }
+  @supports (backdrop-filter: blur(1px)) { #box { background: rgb(10 8 25 / .9); backdrop-filter: blur(18px); } }
+  .bar { display: flex; align-items: center; justify-content: space-between; padding: max(12px, env(safe-area-inset-top)) 14px 8px; color: var(--muted); font: 600 .9rem/1 var(--body); }
+  #stage { position: relative; display: flex; align-items: center; justify-content: center; min-height: 0; padding: 0 8px; touch-action: pan-y; }
+  #stage img, #stage video { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; box-shadow: 0 20px 60px rgb(0 0 0 / .5); }
+  #stage img { animation: show .25s ease; }
+  @keyframes show { from { opacity: 0; transform: scale(.985); } }
+  .info { display: flex; align-items: flex-end; gap: 16px; padding: 14px max(20px, env(safe-area-inset-left)) calc(16px + env(safe-area-inset-bottom)); }
+  .info .text { flex: 1; min-width: 0; }
+  #caption { font: 700 1.25rem/1.25 var(--head); margin: 0 0 2px; }
+  #caption:empty { display: none; }
+  #when { color: var(--muted); font-size: .92rem; }
+  .round { width: 44px; height: 44px; border-radius: 50%; border: 0; display: grid; place-items: center; cursor: pointer; color: #fff;
+           background: rgb(255 255 255 / .1); transition: background .15s; }
+  .round:hover { background: rgb(255 255 255 / .2); }
+  .round svg { width: 22px; height: 22px; }
+  .arrow { position: absolute; top: 50%; translate: 0 -50%; }
+  #prev { left: 12px; } #next { right: 12px; }
+  .arrow[disabled] { opacity: 0; pointer-events: none; }
+  #dl { display: inline-flex; align-items: center; gap: 8px; background: var(--sun); color: var(--ink); text-decoration: none; font: 700 .95rem/1 var(--body);
+        padding: 12px 18px; border-radius: 99px; white-space: nowrap; }
+  #dl svg { width: 18px; height: 18px; }
+  @media (hover: none) { .arrow { display: none; } }
+  @media (max-width: 640px) { #dl span { display: none; } #dl { padding: 12px; } }
+
+  .gone { min-height: 80vh; display: grid; place-content: center; justify-items: center; text-align: center; gap: 14px; padding: 24px; }
+  .gone svg { width: 120px; height: auto; }
+  .gone h1 { font-size: clamp(1.8rem, 1.4rem + 2vw, 2.6rem); margin: 8px 0 0; }
+  .gone p { color: var(--muted); max-width: 30rem; margin: 0; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 </head>
 <body>
+{{define "mark"}}<svg viewBox="17 24 74 52" aria-hidden="true"><circle cx="34" cy="43" r="14" fill="#4429B8"/><circle cx="74" cy="43" r="14" fill="#4429B8"/><circle cx="35.5" cy="44" r="9" fill="#8A73F2" fill-opacity=".55"/><circle cx="72.5" cy="44" r="9" fill="#8A73F2" fill-opacity=".55"/><path d="M36,48 C36,35 44,28 54,28 C64,28 72,35 72,48 C72,57 64,61 54,61 C44,61 36,57 36,48 Z" fill="#5B3FD9"/><ellipse cx="47.8" cy="43" rx="4.3" ry="5.2" fill="#fff"/><circle cx="49.1" cy="44.6" r="2.6" fill="#1E1B3A"/><circle cx="50" cy="43.6" r=".85" fill="#fff"/><ellipse cx="60.2" cy="43" rx="4.3" ry="5.2" fill="#fff"/><circle cx="61.5" cy="44.6" r="2.6" fill="#1E1B3A"/><circle cx="62.4" cy="43.6" r=".85" fill="#fff"/><path d="M54,56 C54.5,62 54,65.5 52.3,68 C50.6,70.5 47,71.5 45.4,69.6" fill="none" stroke="#5B3FD9" stroke-width="6.4" stroke-linecap="round"/></svg>{{end}}
 {{if .Gone}}
-<div class="gone">
+<main class="gone">
+  {{template "mark"}}
   <h1>Dieser Link gilt nicht mehr</h1>
-  <p>Er ist abgelaufen oder wurde zurückgezogen. Frag die Person, die ihn dir geschickt hat.</p>
-</div>
-{{else}}
-<header>
-  <div class="brand">trunk</div>
-  <h1>{{.Title}}</h1>
-  <p>{{if .Owner}}Geteilt von {{.Owner}} · {{end}}{{len .Assets}} {{if eq (len .Assets) 1}}Bild{{else}}Bilder{{end}}</p>
-</header>
-<main>
-  <div class="grid">
-    {{range $i, $a := .Assets}}
-    <button data-i="{{$i}}" aria-label="Bild {{$i}} öffnen"><img loading="lazy" src="/s/{{$.Token}}/t/{{$a.ID}}/medium" alt="">{{if eq $a.Kind "video"}}<span class="play">▶</span>{{end}}</button>
-    {{end}}
-  </div>
+  <p>Er ist abgelaufen oder wurde zurückgezogen. Frag am besten die Person, die ihn dir geschickt hat.</p>
 </main>
-<footer>Geteilt mit trunk</footer>
-<div id="box" role="dialog" aria-modal="true">
-  <button class="nav" id="close" aria-label="Schließen">✕</button>
-  <button class="nav" id="prev" aria-label="Zurück">‹</button>
-  <button class="nav" id="next" aria-label="Weiter">›</button>
-  <div id="stage"></div>
-  <div id="bar"><div class="text" id="info"></div>{{if .Download}}<a id="dl" href="#">Herunterladen</a>{{end}}</div>
+{{else}}
+<div class="top">{{template "mark"}}<span class="word">trunk</span></div>
+<header>
+  <h1>{{.Title}}</h1>
+  {{if .Owner}}<p class="by">geteilt von <b>{{.Owner}}</b></p>{{end}}
+  {{if .Meta}}<p class="by">{{.Meta}}</p>{{end}}
+</header>
+<main class="gallery">
+  {{range $i, $a := .Assets}}
+  <button class="tile" style="--r: {{ratio $a}}" data-i="{{$i}}" aria-label="{{if $a.Caption}}{{$a.Caption}}{{else}}Bild {{$i}}{{end}} öffnen">
+    <img loading="lazy" decoding="async" src="/s/{{$.Token}}/t/{{$a.ID}}/medium" alt="">
+    {{if eq $a.Kind "video"}}<span class="badge"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>Video</span>{{end}}
+  </button>
+  {{end}}
+</main>
+<footer>{{template "mark"}}<span>Geteilt mit</span><span class="word">trunk</span></footer>
+
+<div id="box" role="dialog" aria-modal="true" aria-label="Bild">
+  <div class="bar">
+    <span id="count"></span>
+    <button class="round" id="close" aria-label="Schließen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>
+  <div id="stage">
+    <button class="round arrow" id="prev" aria-label="Zurück"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
+    <button class="round arrow" id="next" aria-label="Weiter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg></button>
+  </div>
+  <div class="info">
+    <div class="text"><p id="caption"></p><div id="when"></div></div>
+    {{if .Download}}<a id="dl" href="#" download><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span>Original laden</span></a>{{end}}
+  </div>
 </div>
 <script>
   const items = [{{range .Assets}}{id: {{.ID}}, video: {{eq .Kind "video"}}, caption: {{.Caption}}, place: {{with .Place}}{{.City}}{{else}}""{{end}}, date: {{date .}}},{{end}}];
   const token = {{.Token}};
-  const box = document.getElementById('box'), stage = document.getElementById('stage'), info = document.getElementById('info'), dl = document.getElementById('dl');
+  const $ = id => document.getElementById(id);
+  const box = $('box'), stage = $('stage'), dl = $('dl');
+  const thumb = (it, size) => `/s/${token}/t/${it.id}/${size}`;
   let cur = -1;
+
+  // Thumbnails fade in once they have loaded.
+  document.querySelectorAll('.tile img').forEach(img => {
+    if (img.complete) img.classList.add('in'); else img.addEventListener('load', () => img.classList.add('in'), {once: true});
+  });
+
   function show(i) {
     if (i < 0 || i >= items.length) return;
     cur = i;
     const it = items[i];
-    stage.replaceChildren();
+    stage.querySelectorAll('img, video').forEach(e => e.remove());
     let el;
     if (it.video) {
       el = document.createElement('video');
       el.controls = true; el.autoplay = true; el.playsInline = true;
-      el.poster = `/s/${token}/t/${it.id}/preview`;
+      el.poster = thumb(it, 'preview');
       el.src = `/s/${token}/f/${it.id}`;
     } else {
       el = document.createElement('img');
-      el.src = `/s/${token}/t/${it.id}/preview`;
+      el.src = thumb(it, 'preview');
       el.alt = it.caption || '';
     }
-    stage.append(el);
-    const line = [it.date, it.place].filter(Boolean).join(' · ');
-    info.replaceChildren();
-    if (it.caption) { info.append(it.caption); }
-    if (line) { const s = document.createElement('small'); s.textContent = line; info.append(s); }
+    stage.prepend(el);
+    $('count').textContent = `${i + 1} / ${items.length}`;
+    $('caption').textContent = it.caption || '';
+    $('when').textContent = [it.date, it.place].filter(Boolean).join(' · ');
+    $('prev').disabled = i === 0;
+    $('next').disabled = i === items.length - 1;
     if (dl) dl.href = `/s/${token}/f/${it.id}?dl`;
+    // The neighbours load in the background, so going on is instant.
+    [i - 1, i + 1].forEach(j => { if (items[j] && !items[j].video) new Image().src = thumb(items[j], 'preview'); });
     // Opening adds a history entry, so the back button closes the photo instead of leaving the page.
     if (box.classList.contains('open')) history.replaceState({photo: true}, '', '#' + it.id);
-    else history.pushState({photo: true}, '', '#' + it.id);
-    box.classList.add('open');
+    else { history.pushState({photo: true}, '', '#' + it.id); box.classList.add('open'); document.body.style.overflow = 'hidden'; }
   }
-  function hide() { box.classList.remove('open'); stage.replaceChildren(); }
+  function hide() {
+    box.classList.remove('open');
+    document.body.style.overflow = '';
+    stage.querySelectorAll('img, video').forEach(e => e.remove());
+    const tile = document.querySelector(`.tile[data-i="${cur}"]`);
+    if (tile) tile.focus({preventScroll: false});
+  }
   function close() { if (history.state && history.state.photo) history.back(); else { hide(); history.replaceState(null, '', location.pathname); } }
   window.addEventListener('popstate', () => { if (box.classList.contains('open')) hide(); });
-  document.querySelectorAll('.grid button').forEach(b => b.addEventListener('click', () => show(+b.dataset.i)));
-  document.getElementById('close').onclick = close;
-  document.getElementById('prev').onclick = () => show(cur - 1);
-  document.getElementById('next').onclick = () => show(cur + 1);
+
+  document.querySelectorAll('.tile').forEach(b => b.addEventListener('click', () => show(+b.dataset.i)));
+  $('close').onclick = close;
+  $('prev').onclick = () => show(cur - 1);
+  $('next').onclick = () => show(cur + 1);
   document.addEventListener('keydown', e => {
     if (!box.classList.contains('open')) return;
     if (e.key === 'Escape') close();

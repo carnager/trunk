@@ -4,18 +4,21 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
-	_ "embed"
+	"embed"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"html/template"
 	"mime"
 	"net/http"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/carnager/trunk/internal/media"
+	"golang.org/x/text/language"
 )
 
 // Public links show photos to people without an account: an album as it is
@@ -302,18 +305,91 @@ func (s *Server) linkAsset(w http.ResponseWriter, r *http.Request) (*publicLink,
 //go:embed web/share.html
 var shareHTML string
 
+//go:embed web/fonts/*.woff2
+var shareFonts embed.FS
+
+var germanMonths = []string{"Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"}
+
+func localDate(a *Asset) (time.Time, bool) {
+	t, err := time.Parse("2006-01-02T15:04:05", a.LocalTime)
+	return t, err == nil && a.LocalTime != ""
+}
+
+// dateRange says when the photos were taken, as briefly as it can:
+// "17. Juli 2023", "17.–20. Juli 2023", "Juli – September 2023", "2019 – 2023".
+func dateRange(list []*Asset) string {
+	var lo, hi time.Time
+	for _, a := range list {
+		if t, ok := localDate(a); ok {
+			if lo.IsZero() || t.Before(lo) {
+				lo = t
+			}
+			if t.After(hi) {
+				hi = t
+			}
+		}
+	}
+	m := func(t time.Time) string { return germanMonths[t.Month()-1] }
+	switch {
+	case lo.IsZero():
+		return ""
+	case lo.Year() != hi.Year():
+		return fmt.Sprintf("%d – %d", lo.Year(), hi.Year())
+	case lo.Month() != hi.Month():
+		return fmt.Sprintf("%s – %s %d", m(lo), m(hi), hi.Year())
+	case lo.Day() != hi.Day():
+		return fmt.Sprintf("%d.–%d. %s %d", lo.Day(), hi.Day(), m(hi), hi.Year())
+	}
+	return fmt.Sprintf("%d. %s %d", lo.Day(), m(lo), lo.Year())
+}
+
+// towns are the places the photos were taken, most photos first, at most three.
+func towns(list []*Asset) string {
+	count := map[string]int{}
+	var order []string
+	for _, a := range list {
+		if a.Place != nil && a.Place.City != "" {
+			if count[a.Place.City] == 0 {
+				order = append(order, a.Place.City)
+			}
+			count[a.Place.City]++
+		}
+	}
+	sort.SliceStable(order, func(i, j int) bool { return count[order[i]] > count[order[j]] })
+	if len(order) > 3 {
+		order = append(order[:3], "…")
+	}
+	return strings.Join(order, ", ")
+}
+
 var shareTmpl = template.Must(template.New("share").Funcs(template.FuncMap{
 	"date": func(a *Asset) string {
-		if a.LocalTime == "" {
+		t, ok := localDate(a)
+		if !ok {
 			return ""
 		}
-		t, err := time.Parse("2006-01-02T15:04:05", a.LocalTime)
-		if err != nil {
-			return ""
+		return fmt.Sprintf("%d. %s %d", t.Day(), germanMonths[t.Month()-1], t.Year())
+	},
+	// Width over height, for rows of photos at their own proportions.
+	"ratio": func(a *Asset) string {
+		if a.Width <= 0 || a.Height <= 0 {
+			return "1"
 		}
-		return t.Format("2.1.2006")
+		return strconv.FormatFloat(float64(a.Width)/float64(a.Height), 'f', 3, 64)
 	},
 }).Parse(shareHTML))
+
+// handleShareFont serves the page's two typefaces (OFL), so nothing loads from elsewhere.
+func (s *Server) handleShareFont(w http.ResponseWriter, r *http.Request) {
+	data, err := shareFonts.ReadFile("web/fonts/" + path.Base(r.PathValue("file")))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "font/woff2")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Write(data)
+}
 
 // handleSharePage is the page behind a link.
 func (s *Server) handleSharePage(w http.ResponseWriter, r *http.Request) {
@@ -327,7 +403,9 @@ func (s *Server) handleSharePage(w http.ResponseWriter, r *http.Request) {
 		shareTmpl.Execute(w, map[string]any{"Gone": true})
 		return
 	}
-	list, err := s.linkAssets(r.Context(), l)
+	// The page is German, so are its place names.
+	ctx := context.WithValue(r.Context(), langKey{}, []language.Tag{language.German})
+	list, err := s.linkAssets(ctx, l)
 	if err != nil {
 		s.internal(w, err)
 		return
@@ -336,8 +414,35 @@ func (s *Server) handleSharePage(w http.ResponseWriter, r *http.Request) {
 	s.db.QueryRowContext(r.Context(), `SELECT name FROM users WHERE id = ?`, l.userID).Scan(&owner)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, no-cache")
+	videos := 0
+	for _, a := range list {
+		if a.Kind == "video" {
+			videos++
+		}
+	}
+	count := fmt.Sprintf("%d Fotos", len(list)-videos)
+	switch {
+	case len(list)-videos == 1:
+		count = "1 Foto"
+	case len(list) == videos:
+		count = ""
+	}
+	if videos > 0 {
+		v := fmt.Sprintf("%d Videos", videos)
+		if videos == 1 {
+			v = "1 Video"
+		}
+		count = strings.TrimPrefix(count+" und "+v, " und ")
+	}
+	meta := []string{}
+	for _, p := range []string{count, dateRange(list), towns(list)} {
+		if p != "" {
+			meta = append(meta, p)
+		}
+	}
 	shareTmpl.Execute(w, map[string]any{
 		"Title": l.title, "Owner": owner, "Assets": list, "Token": l.token, "Download": l.download,
+		"Meta": strings.Join(meta, " · "),
 	})
 }
 

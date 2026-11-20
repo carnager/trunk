@@ -1155,7 +1155,8 @@ func TestPublicLinks(t *testing.T) {
 		t.Fatalf("album link: %+v", link)
 	}
 	code, body := page(link.Path)
-	if code != 200 || !strings.Contains(body, "Ausflug") || !strings.Contains(body, "Am Tor") || !strings.Contains(body, "Berlin") {
+	if code != 200 || !strings.Contains(body, "Ausflug") || !strings.Contains(body, "Am Tor") || !strings.Contains(body, "Berlin") ||
+		!strings.Contains(body, "Original laden") {
 		t.Fatalf("page: %d %.300s", code, body)
 	}
 	if strings.Contains(body, "52.52") || strings.Contains(body, "13.41") {
@@ -1193,7 +1194,7 @@ func TestPublicLinks(t *testing.T) {
 	if sel.Download || fmt.Sprint(sel.AssetIDs) != fmt.Sprint([]int64{p3.ID}) {
 		t.Errorf("selection link: %+v", sel)
 	}
-	if c, body := page(sel.Path); c != 200 || strings.Contains(body, "Herunterladen") {
+	if c, body := page(sel.Path); c != 200 || strings.Contains(body, "Original laden") {
 		t.Errorf("no-download page: %d", c)
 	}
 	if c, _ := page(fmt.Sprintf("%s/f/%d", sel.Path, p3.ID)); c != 404 {

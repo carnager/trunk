@@ -146,6 +146,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Public: the page behind a link, without an account.
 	m.HandleFunc("GET /s/{token}", s.handleSharePage)
+	m.HandleFunc("GET /s/_/fonts/{file}", s.handleShareFont)
 	m.HandleFunc("GET /s/{token}/t/{id}/{size}", s.handleShareThumb)
 	m.HandleFunc("GET /s/{token}/f/{id}", s.handleShareFile)
 
