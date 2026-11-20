@@ -12,7 +12,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
+	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +26,8 @@ import (
 )
 
 var version = "dev"
+
+var reMotionVideo = regexp.MustCompile(`^\.mp(~\d+)?$`)
 
 func usage() {
 	fmt.Fprint(os.Stderr, `trunk: a home for your photos and videos
@@ -333,7 +338,26 @@ func cmdImportTakeout(args []string) error {
 	}
 	fmt.Println()
 	if len(plan.Skipped) > 0 {
-		fmt.Printf("%d other files skipped (HTML, unknown types, trash)\n", len(plan.Skipped))
+		kinds := map[string]int{}
+		for _, p := range plan.Skipped {
+			k := strings.ToLower(path.Ext(strings.TrimSuffix(p, " (trash)")))
+			if strings.HasSuffix(p, " (trash)") {
+				k = "in the trash"
+			} else if k == "" {
+				k = "no extension"
+			} else if reMotionVideo.MatchString(k) {
+				// Pixel motion photos: Google exports the video part separately,
+				// but the .MP.jpg keeps it embedded too, so nothing is lost.
+				k = "motion photo videos (also inside their .MP.jpg)"
+			}
+			kinds[k]++
+		}
+		var parts []string
+		for k, n := range kinds {
+			parts = append(parts, fmt.Sprintf("%d %s", n, k))
+		}
+		sort.Strings(parts)
+		fmt.Printf("%d other files skipped: %s\n", len(plan.Skipped), strings.Join(parts, ", "))
 	}
 	if *dry {
 		return nil
