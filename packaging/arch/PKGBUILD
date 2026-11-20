@@ -28,7 +28,7 @@ prepare() {
 build() {
   cd "trunk-$pkgver"
   export GOPATH="$srcdir/gopath"
-  export GOFLAGS='-buildmode=pie -trimpath -mod=readonly -modcacherw'
+  export GOFLAGS='-buildmode=pie -trimpath -mod=readonly -modcacherw -buildvcs=false'
   # trunk: static, no cgo; HEIC/AVIF decode through the embedded WASM build.
   CGO_ENABLED=0 go build -tags nodynamic -ldflags "-s -w -X main.version=v$pkgver" -o trunk ./cmd/trunk
   # trunk-ai: cgo, loads libonnxruntime.so when it runs.
