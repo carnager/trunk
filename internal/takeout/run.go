@@ -17,7 +17,10 @@ import (
 type Result struct {
 	Added, Existing, Edits, Failed int
 	AlbumsCreated, AlbumsUpdated   int
-	Errors                         []string
+	// Motion videos the export had split off: attached to their photo, or
+	// left out because the photo had its video already.
+	MotionAttached, MotionPresent int
+	Errors                        []string
 }
 
 // Run imports the plan into im with jobs files in flight at once, printing
@@ -84,6 +87,15 @@ func Run(ctx context.Context, im *server.Importer, p *Plan, jobs int, log io.Wri
 	var archives []*tarArchive
 	inArchive := map[*tarArchive]map[string]*Item{}
 	var originals, edits []*Item
+	for _, it := range p.Motion {
+		if a := it.archive; a != nil {
+			if inArchive[a] == nil {
+				inArchive[a] = map[string]*Item{}
+				archives = append(archives, a)
+			}
+			inArchive[a][it.Path] = it
+		}
+	}
 	for _, it := range p.Items {
 		if it.EditOf != nil {
 			edits = append(edits, it)
@@ -98,7 +110,7 @@ func Run(ctx context.Context, im *server.Importer, p *Plan, jobs int, log io.Wri
 			inArchive[a][it.Path] = it
 		}
 	}
-	spooledEdits := map[*Item]server.Spooled{}
+	spooledEdits := map[*Item]server.Spooled{} // edits and motion videos, until their photo is in
 
 	work(func(ch chan<- job) {
 		for _, it := range originals {
@@ -124,7 +136,7 @@ func Run(ctx context.Context, im *server.Importer, p *Plan, jobs int, log io.Wri
 					fail(it, err)
 					return nil
 				}
-				if it.EditOf != nil {
+				if it.EditOf != nil || it.MotionOf != nil {
 					mu.Lock()
 					spooledEdits[it] = sp
 					mu.Unlock()
@@ -216,6 +228,44 @@ func Run(ctx context.Context, im *server.Importer, p *Plan, jobs int, log io.Wri
 		mu.Unlock()
 		return nil
 	})
+	// Motion videos the export split off, onto their photos.
+	for _, it := range p.Motion {
+		if ctx.Err() != nil {
+			break
+		}
+		mu.Lock()
+		id, ok := ids[it.MotionOf]
+		sp, spooled := spooledEdits[it]
+		delete(spooledEdits, it)
+		mu.Unlock()
+		if !spooled && it.Open != nil {
+			r, err := it.Open()
+			if err == nil {
+				sp, err = im.Spool(r)
+				r.Close()
+			}
+			if err != nil {
+				fail(it, err)
+				continue
+			}
+			spooled = true
+		}
+		if !ok || !spooled {
+			if spooled {
+				sp.Discard()
+			}
+			continue // its photo was not imported (or not read): nothing to attach to
+		}
+		attached, err := im.AttachMotionSpooled(ctx, id, sp)
+		switch {
+		case err != nil:
+			fail(it, err)
+		case attached:
+			res.MotionAttached++
+		default:
+			res.MotionPresent++
+		}
+	}
 	close(stop)
 	for _, sp := range spooledEdits {
 		sp.Discard() // interrupted before their turn

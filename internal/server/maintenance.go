@@ -102,22 +102,25 @@ func (s *Server) Verify(ctx context.Context, opt VerifyOptions) ([]Problem, erro
 		kind, mime string
 	}
 	var files []file
-	rows, err := s.db.QueryContext(ctx, `SELECT id, path, sha256, size, kind, mime, orig_path, orig_sha256, orig_size
-		FROM assets WHERE deleted_at IS NULL`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, path, sha256, size, kind, mime, orig_path, orig_sha256, orig_size,
+		motion_path, motion_length FROM assets WHERE deleted_at IS NULL`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var f file
-		var op, osha sql.NullString
-		var osize sql.NullInt64
-		if err := rows.Scan(&f.asset, &f.path, &f.sha, &f.size, &f.kind, &f.mime, &op, &osha, &osize); err != nil {
+		var op, osha, mp sql.NullString
+		var osize, mlen sql.NullInt64
+		if err := rows.Scan(&f.asset, &f.path, &f.sha, &f.size, &f.kind, &f.mime, &op, &osha, &osize, &mp, &mlen); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		files = append(files, f)
 		if op.Valid { // the first upload of an edited photo
 			files = append(files, file{f.asset, op.String, osha.String, osize.Int64, f.kind, f.mime})
+		}
+		if mp.Valid { // a motion video kept apart; there is no hash to compare
+			files = append(files, file{f.asset, mp.String, "", mlen.Int64, "video", "video/mp4"})
 		}
 	}
 	rows.Close()
@@ -142,7 +145,7 @@ func (s *Server) Verify(ctx context.Context, opt VerifyOptions) ([]Problem, erro
 			problems = append(problems, Problem{"size", f.path, f.asset, fmt.Sprintf("%d bytes, expected %d", st.Size(), f.size)})
 			continue
 		}
-		if opt.Hash {
+		if opt.Hash && f.sha != "" {
 			sum, err := hashFile(abs)
 			if err != nil {
 				problems = append(problems, Problem{"missing", f.path, f.asset, err.Error()})
@@ -205,7 +208,8 @@ func (s *Server) Reindex(ctx context.Context, progress func(path string)) (Reind
 	var res ReindexResult
 	known := map[string]bool{}
 	rows, err := s.db.QueryContext(ctx, `SELECT path FROM assets WHERE deleted_at IS NULL
-		UNION SELECT orig_path FROM assets WHERE orig_path IS NOT NULL AND deleted_at IS NULL`)
+		UNION SELECT orig_path FROM assets WHERE orig_path IS NOT NULL AND deleted_at IS NULL
+		UNION SELECT motion_path FROM assets WHERE motion_path IS NOT NULL AND deleted_at IS NULL`)
 	if err != nil {
 		return res, err
 	}
@@ -240,8 +244,8 @@ func (s *Server) Reindex(ctx context.Context, progress func(path string)) (Reind
 		}
 		rel, _ := filepath.Rel(root, p)
 		rel = filepath.ToSlash(rel)
-		if known[rel] {
-			return nil
+		if known[rel] || strings.HasSuffix(rel, motionSuffix) {
+			return nil // a motion video kept apart comes in with its photo
 		}
 		owner, _, _ := strings.Cut(rel, "/")
 		uid, ok := users[strings.ToLower(owner)]
@@ -297,6 +301,15 @@ func (s *Server) adopt(ctx context.Context, userID int64, rel string) (bool, err
 	if _, ok, err := s.findBySHA(ctx, userID, sum); err != nil || ok {
 		return false, err
 	}
-	_, err = s.insertAsset(ctx, ingestReq{UserID: userID, SHA256: sum, Name: name}, rel, info, st.Size(), taken, nil)
-	return err == nil, err
+	id, err := s.insertAsset(ctx, ingestReq{UserID: userID, SHA256: sum, Name: name}, rel, info, st.Size(), taken, nil)
+	if err != nil {
+		return false, err
+	}
+	// Its motion video, if it was kept apart.
+	if mp := motionPathFor(rel); info.MotionLength == 0 {
+		if mst, err := os.Stat(filepath.Join(s.originals, filepath.FromSlash(mp))); err == nil {
+			s.db.ExecContext(ctx, `UPDATE assets SET motion_path = ?, motion_offset = 0, motion_length = ? WHERE id = ?`, mp, mst.Size(), id)
+		}
+	}
+	return true, nil
 }

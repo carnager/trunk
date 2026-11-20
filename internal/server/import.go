@@ -99,6 +99,22 @@ func (im *Importer) EditSpooled(ctx context.Context, id int64, sp Spooled) error
 	return err
 }
 
+// AttachMotionSpooled makes a spooled MP4 the motion video of photo id, for
+// exports that split motion photos in two. attached is false when the photo
+// already has its video (the clip was a copy).
+func (im *Importer) AttachMotionSpooled(ctx context.Context, id int64, sp Spooled) (attached bool, err error) {
+	defer sp.Discard() // a no-op once the file is in the library
+	a, err := im.s.getAsset(ctx, im.userID, id)
+	if err != nil {
+		return false, err
+	}
+	err = im.s.attachMotion(ctx, a, sp.path)
+	if errors.Is(err, errHasMotion) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // Album adds ids to the end of the album called name, creating it if needed.
 // Ids already in it keep their place, so running an import again is harmless.
 func (im *Importer) Album(ctx context.Context, name string, ids []int64) (created bool, err error) {

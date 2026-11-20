@@ -76,14 +76,16 @@ type Asset struct {
 	path     string // current file, relative to the originals dir
 	origPath string // first upload, if edited
 
-	// Motion photo: the video's place in the first upload (an edit keeps no video).
+	// Motion photo: the video's place in the first upload (an edit keeps no
+	// video), or in a file of its own.
 	motionOff, motionLen int64
+	motionPath           string
 }
 
 const assetCols = `id, user_id, seq, sha256, path, orig_name, kind, mime, size, taken_at, tz_offset,
 	width, height, orientation, duration_ms, lat, lon, alt, make, model, lens, f_number, exposure, iso,
 	focal_length, favorite, trashed_at, deleted_at, created_at, updated_at,
-	orig_path, orig_sha256, orig_size, orig_mime, edited_at, place_id, caption, motion_offset, motion_length`
+	orig_path, orig_sha256, orig_size, orig_mime, edited_at, place_id, caption, motion_offset, motion_length, motion_path`
 
 type scanner interface{ Scan(...any) error }
 
@@ -101,11 +103,12 @@ func (s *Server) scanAsset(sc scanner) (*Asset, error) {
 		placeID                          sql.NullInt64
 		caption                          sql.NullString
 		motionOff, motionLen             sql.NullInt64
+		motionPath                       sql.NullString
 	)
 	err := sc.Scan(&a.ID, &a.userID, &a.Seq, &a.SHA256, &a.path, &a.Name, &a.Kind, &a.MIME, &a.Size,
 		&taken, &tz, &w, &h, &orient, &dur, &lat, &lon, &alt, &mk, &model, &lens, &fnum, &expo, &iso,
 		&focal, &fav, &trashed, &deleted, &created, &updated,
-		&oPath, &oSHA, &oSize, &oMIME, &edited, &placeID, &caption, &motionOff, &motionLen)
+		&oPath, &oSHA, &oSize, &oMIME, &edited, &placeID, &caption, &motionOff, &motionLen, &motionPath)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +136,7 @@ func (s *Server) scanAsset(sc scanner) (*Asset, error) {
 		a.TrashedAt, a.TrashExpiresAt = &tt, &exp
 	}
 	a.placeID, a.Caption = placeID.Int64, caption.String
-	a.motionOff, a.motionLen = motionOff.Int64, motionLen.Int64
+	a.motionOff, a.motionLen, a.motionPath = motionOff.Int64, motionLen.Int64, motionPath.String
 	a.Motion = a.motionLen > 0
 	if edited.Valid {
 		e := time.UnixMilli(edited.Int64).UTC()
@@ -492,9 +495,9 @@ func (s *Server) purge(ctx context.Context, userID int64, ids []int64) (int, err
 	n := 0
 	for _, id := range ids {
 		var rel, sha string
-		var orig sql.NullString
-		err := s.db.QueryRowContext(ctx, `SELECT path, sha256, orig_path FROM assets
-			WHERE id = ? AND user_id = ? AND trashed_at IS NOT NULL AND deleted_at IS NULL`, id, userID).Scan(&rel, &sha, &orig)
+		var orig, motion sql.NullString
+		err := s.db.QueryRowContext(ctx, `SELECT path, sha256, orig_path, motion_path FROM assets
+			WHERE id = ? AND user_id = ? AND trashed_at IS NOT NULL AND deleted_at IS NULL`, id, userID).Scan(&rel, &sha, &orig, &motion)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		} else if err != nil {
@@ -503,7 +506,7 @@ func (s *Server) purge(ctx context.Context, userID int64, ids []int64) (int, err
 		if err := s.tombstone(ctx, id); err != nil {
 			return n, err
 		}
-		for _, p := range []string{rel, orig.String} {
+		for _, p := range []string{rel, orig.String, motion.String} {
 			if p == "" {
 				continue
 			}
@@ -528,7 +531,7 @@ func (s *Server) tombstone(ctx context.Context, id int64) error {
 		return err
 	}
 	now := time.Now().UnixMilli()
-	if _, err := tx.ExecContext(ctx, `UPDATE assets SET deleted_at = ?, path = '', orig_path = NULL,
+	if _, err := tx.ExecContext(ctx, `UPDATE assets SET deleted_at = ?, path = '', orig_path = NULL, motion_path = NULL,
 		seq = ?, updated_at = ? WHERE id = ?`, now, seq, now, id); err != nil {
 		return err
 	}

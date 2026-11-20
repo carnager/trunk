@@ -259,6 +259,9 @@ type Item struct {
 	Name    string   // file name
 	Sidecar *Sidecar // nil if none was found
 	EditOf  *Item    // set for "-edited" copies whose original is in the same folder
+	// Set for a motion photo's video that the export split off (X.MP next
+	// to X.MP.jpg, X.MP4 next to X.jpg), with Options.Motion.
+	MotionOf *Item
 }
 
 // Album is a folder Google marked as an album.
@@ -272,6 +275,39 @@ type Plan struct {
 	Items   []*Item // originals first, then edits
 	Albums  []*Album
 	Skipped []string // files that are neither media nor metadata, or trashed
+	Motion  []*Item  // motion videos to attach to their photos (Options.Motion)
+}
+
+// Options change what a plan takes in.
+type Options struct {
+	// Motion attaches motion videos the export split off to their photos,
+	// instead of skipping them (.MP) or importing them as videos (.MP4).
+	Motion bool
+}
+
+// reMotionClip matches what Google calls a motion photo's video when it
+// exports it apart: X.MP, X.MP~2 and, from older Pixels, X.MP4 (upper case;
+// ordinary videos are .mp4).
+var reMotionClip = regexp.MustCompile(`^(.+?)\.(MP|mp)(~\d+)?$|^(.+)\.MP4$`)
+
+// motionStill finds the photo a split-off motion video belongs to.
+func motionStill(clip string, byName map[string]*Item) *Item {
+	m := reMotionClip.FindStringSubmatch(clip)
+	if m == nil {
+		return nil
+	}
+	var names []string
+	if m[4] != "" { // X.MP4
+		names = []string{m[4] + ".jpg", m[4] + ".MP.jpg", m[4] + ".jpeg"}
+	} else { // X.MP, X.MP~2
+		names = []string{clip + ".jpg", m[1] + ".jpg", clip + ".jpeg"}
+	}
+	for _, n := range names {
+		if it := byName[strings.ToLower(n)]; it != nil && it.EditOf == nil {
+			return it
+		}
+	}
+	return nil
 }
 
 var mediaExt = map[string]bool{
@@ -288,7 +324,7 @@ var editSuffixes = []string{"-edited", "-bearbeitet", "-modifié", "-editado", "
 
 // NewPlan groups the entries by folder, pairs media with their sidecars and
 // finds edits and albums. Unreadable sidecars are treated as missing.
-func NewPlan(entries []Entry) *Plan {
+func NewPlan(entries []Entry, opt Options) *Plan {
 	dirs := map[string][]Entry{}
 	var order []string
 	for _, e := range entries {
@@ -311,7 +347,7 @@ func NewPlan(entries []Entry) *Plan {
 		}
 		sidecars := map[string]*Sidecar{} // by JSON name without ".json"
 		albumName := ""
-		var media []Entry
+		var media, clips []Entry
 		for _, e := range dirs[d] {
 			name := path.Base(e.Path)
 			ext := strings.ToLower(path.Ext(name))
@@ -329,6 +365,8 @@ func NewPlan(entries []Entry) *Plan {
 					continue
 				}
 				sidecars[strings.TrimSuffix(name, path.Ext(name))] = sc
+			case opt.Motion && reMotionClip.MatchString(name):
+				clips = append(clips, e)
 			case mediaExt[ext]:
 				media = append(media, e)
 			default:
@@ -363,6 +401,16 @@ func NewPlan(entries []Entry) *Plan {
 				edits = append(edits, it)
 			} else {
 				items = append(items, it) // no original here: import the edit as a photo of its own
+			}
+		}
+		for _, e := range clips {
+			name := path.Base(e.Path)
+			if still := motionStill(name, byName); still != nil {
+				p.Motion = append(p.Motion, &Item{Entry: e, Name: name, MotionOf: still})
+			} else if mediaExt[strings.ToLower(path.Ext(name))] {
+				items = append(items, &Item{Entry: e, Name: name, Sidecar: MatchSidecar(name, sidecars)}) // a video after all
+			} else {
+				p.Skipped = append(p.Skipped, e.Path)
 			}
 		}
 		p.Items = append(p.Items, items...)

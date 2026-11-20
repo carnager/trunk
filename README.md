@@ -53,6 +53,12 @@ zone). Favourites stay favourites, albums become trunk albums, and Google's "-ed
 become edits of their originals, so both versions are kept. Running it again only adds what is
 missing, e.g. after a broken download.
 
+Motion photos: Google exports their video part a second time as a file of its own (`X.MP` next to
+`X.MP.jpg`, `X.MP4` next to `X.jpg` from older Pixels). Usually the photo still has it, so these
+are skipped (`.MP`) or imported as short videos (`.MP4`). Sometimes the export drops the video
+from the photo; with `-motion` trunk attaches such files to their photos instead, where the photo
+lacks its video, and leaves out the copies. It can be run over an earlier import.
+
 The originals tree is the source of truth and stays readable without trunk. Back up
 `originals/` and `trunk.db`; thumbnails can be regenerated.
 

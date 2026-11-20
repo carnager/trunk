@@ -238,6 +238,11 @@ CREATE TABLE similar_ignored (
 ALTER TABLE assets ADD COLUMN motion_offset INTEGER;
 ALTER TABLE assets ADD COLUMN motion_length INTEGER;
 `,
+	// 11: a motion photo's video kept as a file of its own (when an export
+	// had split it off), next to the photo: motion_path, the whole file.
+	`
+ALTER TABLE assets ADD COLUMN motion_path TEXT;
+`,
 }
 
 func migrate(d *sql.DB) error {

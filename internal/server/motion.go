@@ -3,19 +3,26 @@ package server
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/carnager/trunk/internal/db"
 	"github.com/carnager/trunk/internal/media"
 )
 
-// motionFile is the file that holds a motion photo's video: the first
-// upload, since an edit is a plain picture.
+// motionFile is the file that holds a motion photo's video: one of its own,
+// or else the first upload, since an edit is a plain picture.
 func (a *Asset) motionFile() string {
+	if a.motionPath != "" {
+		return a.motionPath
+	}
 	if a.origPath != "" {
 		return a.origPath
 	}
@@ -27,7 +34,7 @@ func (a *Asset) motionFile() string {
 // next sync; the others are only marked as looked at.
 func (s *Server) fillMotion(ctx context.Context) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+assetCols+` FROM assets
-		WHERE motion_offset IS NULL AND deleted_at IS NULL`)
+		WHERE motion_offset IS NULL AND motion_path IS NULL AND deleted_at IS NULL`)
 	if err != nil {
 		s.log.Error("motion photos", "err", err)
 		return
@@ -113,4 +120,65 @@ func (s *Server) serveMotion(w http.ResponseWriter, r *http.Request, a *Asset) {
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 	http.ServeContent(w, r, "", st.ModTime(), io.NewSectionReader(f, a.motionOff, a.motionLen))
+}
+
+// motionSuffix names a motion photo's video kept as a file of its own:
+// photo.jpg → photo.motion.mp4, next to it.
+const motionSuffix = ".motion.mp4"
+
+func motionPathFor(photo string) string {
+	return strings.TrimSuffix(photo, path.Ext(photo)) + motionSuffix
+}
+
+// errHasMotion: the photo already has its video.
+var errHasMotion = errors.New("photo already has its motion video")
+
+// attachMotion makes the MP4 at tmp (in the data directory) the motion video
+// of photo a, which has none: an export had split it off. It is moved next
+// to the photo.
+func (s *Server) attachMotion(ctx context.Context, a *Asset, tmp string) error {
+	if a.Motion {
+		return errHasMotion
+	}
+	if a.Kind != "image" {
+		return errNotPhoto
+	}
+	if _, kind, err := media.Sniff(tmp, "motion.mp4"); err != nil || kind != "video" {
+		return fmt.Errorf("not a video")
+	}
+	st, err := os.Stat(tmp)
+	if err != nil {
+		return err
+	}
+	photo := a.path
+	if a.origPath != "" {
+		photo = a.origPath
+	}
+	rel := motionPathFor(photo)
+	abs := filepath.Join(s.originals, filepath.FromSlash(rel))
+	if _, err := os.Stat(abs); err == nil {
+		return fmt.Errorf("%s exists", rel)
+	}
+	if err := os.Rename(tmp, abs); err != nil {
+		return err
+	}
+	err = s.inTx(ctx, func(tx *sql.Tx, _, now int64) error {
+		seq, err := db.NextSeq(ctx, tx)
+		if err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE assets SET motion_path = ?, motion_offset = 0, motion_length = ?, seq = ?, updated_at = ?
+			WHERE id = ? AND deleted_at IS NULL AND motion_path IS NULL AND COALESCE(motion_length, 0) = 0`, rel, st.Size(), seq, now, a.ID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return errHasMotion
+		}
+		return nil
+	})
+	if err != nil {
+		os.Remove(abs)
+	}
+	return err
 }

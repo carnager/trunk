@@ -94,7 +94,7 @@ func TestNewPlan(t *testing.T) {
 		entry("Takeout/Google Photos/Papierkorb/IMG_9.jpg", "9"),
 		entry("Takeout/Google Photos/Photos from 2023/notes.txt", "?"),
 		entry("Takeout/archive_browser.html", "<html>"),
-	})
+	}, Options{})
 	var originals, edits []string
 	for _, it := range p.Items {
 		if it.EditOf != nil {

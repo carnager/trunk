@@ -1588,3 +1588,51 @@ func TestMotionPhotos(t *testing.T) {
 		t.Errorf("backfill: motion %v seq %d→%d, still seq %d→%d, unchecked %d", after.Motion, seqBefore, seqAfter, stillSeq, stillAfter, unchecked)
 	}
 }
+
+func TestMotionFileDeletedWithPhoto(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	alice := e.login("alice", "phone")
+	p := e.upload(alice, "PXL_1.MP.jpg", testJPEG(t, 64, 48, 130, false), 201)
+	var uid int64
+	e.srv.db.QueryRow(`SELECT user_id FROM assets WHERE id = ?`, p.ID).Scan(&uid)
+	a, err := e.srv.getAsset(ctx, uid, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(e.srv.cfg.DataDir, "uploads", "clip")
+	os.MkdirAll(filepath.Dir(tmp), 0o755)
+	// Not a video: refused, and the file stays where it was.
+	os.WriteFile(tmp, []byte("not a video at all"), 0o644)
+	if err := e.srv.attachMotion(ctx, a, tmp); err == nil {
+		t.Fatal("attached something that is no video")
+	}
+	vp := filepath.Join(t.TempDir(), "v.mp4")
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	exec.Command("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=1:size=160x120:rate=10", "-pix_fmt", "yuv420p", vp).Run()
+	b, _ := os.ReadFile(vp)
+	os.WriteFile(tmp, b, 0o644)
+	if err := e.srv.attachMotion(ctx, a, tmp); err != nil {
+		t.Fatal(err)
+	}
+	var got Asset
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", p.ID), alice, nil, 200, &got)
+	res := e.do("GET", fmt.Sprintf("/api/v1/assets/%d/motion", p.ID), alice, nil, nil)
+	body, _ := io.ReadAll(res.Body)
+	if !got.Motion || res.StatusCode != 200 || !bytes.Equal(body, b) {
+		t.Fatalf("attached clip: motion %v, %d, %d bytes", got.Motion, res.StatusCode, len(body))
+	}
+	var rel string
+	e.srv.db.QueryRow(`SELECT motion_path FROM assets WHERE id = ?`, p.ID).Scan(&rel)
+	clipFile := filepath.Join(e.srv.originals, filepath.FromSlash(rel))
+	if _, err := os.Stat(clipFile); err != nil {
+		t.Fatal(err)
+	}
+	e.json("POST", "/api/v1/assets/trash", alice, map[string][]int64{"ids": {p.ID}}, 204, nil)
+	e.json("POST", "/api/v1/assets/delete", alice, map[string][]int64{"ids": {p.ID}}, 200, nil)
+	if _, err := os.Stat(clipFile); !os.IsNotExist(err) {
+		t.Errorf("clip left behind after deleting its photo: %v", err)
+	}
+}

@@ -300,6 +300,7 @@ func cmdImportTakeout(args []string) error {
 	user := fs.String("user", "", "account to import into (required)")
 	dry := fs.Bool("dry-run", false, "only show what would be imported")
 	jobs := fs.Int("jobs", min(8, max(2, runtime.NumCPU()/2)), "files to import at once")
+	motion := fs.Bool("motion", false, "attach motion photo videos the export split off (X.MP, X.MP4) to their photos")
 	// Allow flags after the inputs too: trunk import takeout *.zip -user alice
 	var inputs []string
 	rest := args
@@ -312,7 +313,7 @@ func cmdImportTakeout(args []string) error {
 		rest = fs.Args()[1:]
 	}
 	if *user == "" || len(inputs) == 0 {
-		return errors.New("usage: trunk import takeout -user NAME [-dry-run] [-jobs N] ZIP|TGZ|DIR...")
+		return errors.New("usage: trunk import takeout -user NAME [-dry-run] [-jobs N] [-motion] ZIP|TGZ|DIR...")
 	}
 
 	entries, closer, err := takeout.Sources(inputs, os.Stdout)
@@ -321,7 +322,7 @@ func cmdImportTakeout(args []string) error {
 	}
 	defer closer.Close()
 	fmt.Printf("reading %d files from %d inputs\n", len(entries), len(inputs))
-	plan := takeout.NewPlan(entries)
+	plan := takeout.NewPlan(entries, takeout.Options{Motion: *motion})
 
 	var edits, withSidecar int
 	var bytes int64
@@ -346,6 +347,9 @@ func cmdImportTakeout(args []string) error {
 		fmt.Printf(": %s", strings.Join(names, ", "))
 	}
 	fmt.Println()
+	if *motion {
+		fmt.Printf("%d motion photo videos split off by the export, to attach to their photos where those lack one\n", len(plan.Motion))
+	}
 	if len(plan.Skipped) > 0 {
 		kinds := map[string]int{}
 		for _, p := range plan.Skipped {
@@ -355,9 +359,9 @@ func cmdImportTakeout(args []string) error {
 			} else if k == "" {
 				k = "no extension"
 			} else if reMotionVideo.MatchString(k) {
-				// Pixel motion photos: Google exports the video part separately,
-				// but the .MP.jpg keeps it embedded too, so nothing is lost.
-				k = "motion photo videos (also inside their .MP.jpg)"
+				// Pixel motion photos: Google exports the video part separately;
+				// mostly the .MP.jpg keeps it too. -motion attaches it where not.
+				k = "motion photo videos (usually also inside their photo; -motion attaches them)"
 			}
 			kinds[k]++
 		}
@@ -389,6 +393,9 @@ func cmdImportTakeout(args []string) error {
 	fmt.Printf("done in %s: %d added, %d already there, %d edits, %d failed; albums: %d new, %d updated\n",
 		time.Since(start).Round(time.Second), res.Added, res.Existing, res.Edits, res.Failed,
 		res.AlbumsCreated, res.AlbumsUpdated)
+	if *motion {
+		fmt.Printf("motion videos: %d attached to their photos, %d left out (the photo had its video already)\n", res.MotionAttached, res.MotionPresent)
+	}
 	for _, e := range res.Errors {
 		fmt.Fprintln(os.Stderr, "  "+e)
 	}
