@@ -258,6 +258,43 @@ CREATE TABLE embeddings (
 	PRIMARY KEY (sha256, model)
 );
 `,
+	// 14: faces, found by trunk-ai per file content, and the people they are
+	// grouped into, per user. A box is relative to the picture (0..1).
+	// face_people: manual is a choice the user made (kept by regrouping),
+	// rejected a person the face must not go to again.
+	`
+CREATE TABLE faces (
+	id      INTEGER PRIMARY KEY,
+	sha256  TEXT NOT NULL,
+	model   TEXT NOT NULL,
+	x       REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
+	score   REAL NOT NULL,
+	frontal INTEGER NOT NULL,
+	vec     BLOB NOT NULL
+);
+CREATE INDEX faces_sha ON faces (sha256, model);
+CREATE TABLE face_scans (
+	sha256 TEXT NOT NULL,
+	model  TEXT NOT NULL,
+	PRIMARY KEY (sha256, model)
+);
+CREATE TABLE people (
+	id         INTEGER PRIMARY KEY,
+	user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	name       TEXT NOT NULL DEFAULT '',
+	hidden     INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL
+);
+CREATE TABLE face_people (
+	user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	face_id   INTEGER NOT NULL REFERENCES faces(id) ON DELETE CASCADE,
+	person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+	manual    INTEGER NOT NULL DEFAULT 0,
+	rejected  INTEGER,
+	PRIMARY KEY (user_id, face_id)
+);
+CREATE INDEX face_people_person ON face_people (person_id);
+`,
 }
 
 func migrate(d *sql.DB) error {

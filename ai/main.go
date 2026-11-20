@@ -1,7 +1,9 @@
-// Command trunk-ai gives a trunk server content search: it computes a vector
-// for every photo and video (from its thumbnail) with an image model and
-// sends them to trunk, and uploads the matching text model for phones, which
-// turn search text into vectors themselves. trunk only stores and compares.
+// Command trunk-ai gives a trunk server content search and people: it
+// computes a vector for every photo and video (from its thumbnail) with an
+// image model, finds the faces in every photo with a vector each, and sends
+// them to trunk; it uploads the matching text model for phones, which turn
+// search text into vectors themselves. trunk only stores, compares and
+// groups.
 //
 // It runs where there is computing power (a desktop: about 70 photos a
 // second on a modern CPU), whenever convenient; photos that arrived since
@@ -39,7 +41,8 @@ import (
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage:
-  trunk-ai index  -server URL -user NAME [-batch 32] [-threads N]   vectors for what has none yet
+  trunk-ai index  -server URL -user NAME [-batch 32] [-threads N] [-content=false] [-faces=false]
+                  vectors for content search and faces for people, for what has none yet
   trunk-ai search -server URL -user NAME TEXT                     try a search, as a phone would
 flags may also come from TRUNK_SERVER and TRUNK_USER; the login is remembered in
 `+tokenDir()+`
@@ -58,6 +61,8 @@ func main() {
 	lib := fs.String("lib", "", "path of libonnxruntime.so (default: the system's)")
 	batch := fs.Int("batch", 32, "pictures per model run")
 	threads := fs.Int("threads", runtime.NumCPU(), "CPU threads for the model")
+	doContent := fs.Bool("content", true, "index: vectors for content search")
+	doFaces := fs.Bool("faces", true, "index: find faces, for people")
 	fs.Parse(os.Args[2:])
 	if *server == "" || *user == "" {
 		usage()
@@ -73,7 +78,12 @@ func main() {
 	if err == nil {
 		switch cmd {
 		case "index":
-			err = index(ctx, c, *batch, *threads)
+			if *doContent {
+				err = index(ctx, c, *batch, *threads)
+			}
+			if err == nil && *doFaces {
+				err = indexFaces(ctx, c, *threads)
+			}
 		case "search":
 			err = search(c, strings.Join(fs.Args(), " "))
 		default:

@@ -8,6 +8,8 @@ where there is computing power, a desktop for instance, whenever convenient:
 - it fetches the thumbnails of photos and videos that have no vector yet (the whole household's;
   it needs an admin account), computes one per picture with CLIP ViT-B/32 and sends them to trunk
   (about 70 a second on a modern CPU, no GPU needed);
+- it finds the faces in every photo (YuNet) with a vector each (SFace) and sends them; trunk groups
+  them into people (about 11 photos a second);
 - it uploads the matching text model (multilingual, quantised for phones, 135 MB) to trunk, from
   where apps download it, so they can turn search text into a vector themselves.
 
@@ -31,6 +33,8 @@ The models (pinned by checksum) are downloaded from Hugging Face on first use in
 `~/.cache/trunk-ai`; the login is remembered in `~/.config/trunk-ai`. Run `index` from a timer or
 by hand; it only does what is missing.
 
-Models: [CLIP ViT-B/32](https://huggingface.co/Xenova/clip-vit-base-patch32) (OpenAI, MIT) for
+Models: faces by [YuNet](https://huggingface.co/opencv/face_detection_yunet) (MIT) and
+[SFace](https://huggingface.co/opencv/face_recognition_sface) (Apache 2.0) from OpenCV Zoo, chosen
+over InsightFace's, which are for non-commercial research only. [CLIP ViT-B/32](https://huggingface.co/Xenova/clip-vit-base-patch32) (OpenAI, MIT) for
 pictures, [clip-ViT-B-32-multilingual-v1](https://huggingface.co/sentence-transformers/clip-ViT-B-32-multilingual-v1)
 (Apache 2.0) for text in 50+ languages.

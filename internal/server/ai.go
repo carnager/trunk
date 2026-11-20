@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+
+	"github.com/carnager/trunk/internal/media"
 )
 
 // Content search. trunk runs no model itself: the machines it runs on are
@@ -158,8 +160,12 @@ func (s *Server) handleAIThumb(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, "no thumbnail for this asset")
 		return
 	}
+	size := media.Medium
+	if r.URL.Query().Get("size") == "preview" { // faces need the detail
+		size = media.Preview
+	}
 	w.Header().Set("Content-Type", "image/jpeg")
-	http.ServeFile(w, r, s.thumbPath(a.SHA256, "medium"))
+	http.ServeFile(w, r, s.thumbPath(a.SHA256, size))
 }
 
 // handleAIEmbeddings: PUT /api/v1/ai/embeddings (admin)

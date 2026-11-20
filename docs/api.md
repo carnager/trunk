@@ -178,6 +178,25 @@ trunk for them, and send that. Vectors are unit-length little-endian float32s (b
 compares them (dot product) and returns the best match and everything within 0.035 of it, at least
 0.255 (tuned on CLIP ViT-B/32, multilingual). `features.content_search` says a model is there.
 
+## People
+
+| Call | |
+|---|---|
+| `GET /people` | → `{"people": [{"id", "name", "hidden", "faces", "cover", "asset_ids"}]}`, most photographed first |
+| `PATCH /people/{id}` | `{"name"}` and/or `{"hidden"}` → `204` |
+| `POST /people/{id}/merge` | `{"ids": [..]}`: those people are this one → `204` |
+| `DELETE /people/{id}/faces/{face}` | not this person; the face does not go back to them → `204` |
+| `GET /faces/{id}/thumb` | the face cut from its photo, 200×200 JPEG (`cover` is one) |
+| `GET /assets/{id}/faces` | → `{"faces": [{"id", "box": [x, y, w, h], "person", "name"}]}`, boxes relative to the picture |
+| `GET /ai/faces/todo?model=M` | admin: photos not looked at for faces |
+| `PUT /ai/faces` | admin: `{"model", "items": [{"sha256", "faces": [{"box", "score", "frontal", "vec"}]}]}` |
+
+trunk-ai finds faces (YuNet) and a vector per face (SFace, 128 numbers); trunk groups each user's
+faces into people (DBSCAN: similarity ≥ 0.65, at least 3 frontal faces), some seconds after the
+last faces came. Groups keep the person most of their faces had, so names stick as photos arrive;
+merges and rejections are kept. Faces that fit nobody clearly (profiles, blur, people seen once)
+stay out. People are per user: each names their own.
+
 ## Correcting date and place
 
 | Call | |

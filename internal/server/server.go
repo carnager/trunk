@@ -30,7 +30,8 @@ type Config struct {
 
 // Server owns the data directory and serves the API.
 type Server struct {
-	vecs      vecCache // content search vectors, by model
+	vecs      vecCache      // content search vectors, by model
+	regroupQ  chan struct{} // new faces: group them into people
 	cfg       Config
 	db        *sql.DB
 	log       *slog.Logger
@@ -72,6 +73,7 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 		limit:     limiter{fail: map[string][]time.Time{}},
 		seen:      map[int64]time.Time{},
 		thumbQ:    make(chan int64, 4096),
+		regroupQ:  make(chan struct{}, 1),
 		// Each render holds a decoded original (about 50 MB for 12 MP), so not one per core.
 		thumbSem:   make(chan struct{}, min(8, max(1, runtime.NumCPU()/2))),
 		thumbLock:  map[string]*refMutex{},
@@ -105,6 +107,7 @@ func (s *Server) Run(ctx context.Context) {
 	go s.janitor(ctx)
 	go s.fillPlaces(ctx)
 	go s.fingerprinter(ctx)
+	go s.grouper(ctx)
 	go func() {
 		s.fillMotion(ctx)
 		s.fillMotionHashes(ctx)
@@ -143,6 +146,14 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/v1/ai/model", s.auth(s.handleAIModel))
 	m.HandleFunc("PUT /api/v1/ai/model/{model}/{file}", s.auth(s.handleAIModelPut))
 	m.HandleFunc("GET /api/v1/ai/model/{model}/{file}", s.auth(s.handleAIModelFile))
+	m.HandleFunc("GET /api/v1/ai/faces/todo", s.auth(s.handleFacesTodo))
+	m.HandleFunc("PUT /api/v1/ai/faces", s.auth(s.handleFacesPut))
+	m.HandleFunc("GET /api/v1/people", s.auth(s.handlePeople))
+	m.HandleFunc("PATCH /api/v1/people/{id}", s.auth(s.handlePatchPerson))
+	m.HandleFunc("POST /api/v1/people/{id}/merge", s.auth(s.handleMergePeople))
+	m.HandleFunc("DELETE /api/v1/people/{id}/faces/{face}", s.auth(s.handleRejectFace))
+	m.HandleFunc("GET /api/v1/faces/{id}/thumb", s.auth(s.handleFaceThumb))
+	m.HandleFunc("GET /api/v1/assets/{id}/faces", s.auth(s.handleAssetFaces))
 	m.HandleFunc("POST /api/v1/similar/ignore", s.auth(s.handleSimilarIgnore))
 	m.HandleFunc("POST /api/v1/assets/restore", s.auth(s.handleRestore))
 	m.HandleFunc("POST /api/v1/assets/delete", s.auth(s.handleDelete))
@@ -196,6 +207,7 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 			"motion":         true,
 			"adjust":         true,
 			"content_search": s.currentModel() != "",
+			"people":         true,
 			"source_sha256":  true,
 			"albums":         true,
 			"shared_albums":  true,

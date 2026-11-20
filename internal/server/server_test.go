@@ -1856,3 +1856,125 @@ func TestContentSearch(t *testing.T) {
 		t.Error("content search not offered")
 	}
 }
+
+func TestPeople(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.srv.db.Exec(`UPDATE users SET is_admin = 1 WHERE name = 'alice'`)
+	alice := e.login("alice", "desktop")
+	bob := e.login("bob", "phone")
+	var aliceID int64
+	e.srv.db.QueryRow(`SELECT id FROM users WHERE name = 'alice'`).Scan(&aliceID)
+	var photos []Asset
+	for i := 0; i < 9; i++ {
+		photos = append(photos, e.upload(alice, fmt.Sprintf("p%d.jpg", i), testJPEG(t, 120, 90, uint8(160+i), false), 201))
+	}
+	var todo struct{ Remaining int }
+	e.json("GET", "/api/v1/ai/faces/todo?model="+facesModel, bob, nil, 403, nil)
+	e.json("GET", "/api/v1/ai/faces/todo?model="+facesModel, alice, nil, 200, &todo)
+	if todo.Remaining != 9 {
+		t.Fatalf("faces todo: %+v", todo)
+	}
+	// Face vectors: person A around axis 0, person B around axis 1, one stray.
+	vec := func(axis int, wobble float32, k int) string {
+		v := make([]float32, 128)
+		v[axis] = 1
+		v[50+k] = wobble
+		normalize := float32(math.Sqrt(float64(1 + wobble*wobble)))
+		b := make([]byte, 0, 512)
+		for _, x := range v {
+			b = binary.LittleEndian.AppendUint32(b, math.Float32bits(x/normalize))
+		}
+		return base64.StdEncoding.EncodeToString(b)
+	}
+	faceOf := func(axis, k int) map[string]any {
+		return map[string]any{"box": []float64{0.3, 0.2, 0.3, 0.4}, "score": 0.9, "frontal": true, "vec": vec(axis, 0.2, k)}
+	}
+	sha := func(a Asset) string {
+		var s string
+		e.srv.db.QueryRow(`SELECT sha256 FROM assets WHERE id = ?`, a.ID).Scan(&s)
+		return s
+	}
+	items := []map[string]any{}
+	for i := 0; i < 4; i++ { // A in photos 0–3
+		items = append(items, map[string]any{"sha256": sha(photos[i]), "faces": []any{faceOf(0, i)}})
+	}
+	for i := 4; i < 7; i++ { // B in photos 4–6
+		items = append(items, map[string]any{"sha256": sha(photos[i]), "faces": []any{faceOf(1, i)}})
+	}
+	items = append(items, map[string]any{"sha256": sha(photos[7]), "faces": []any{faceOf(2, 7)}}) // a stranger
+	items = append(items, map[string]any{"sha256": sha(photos[8]), "faces": []any{}})             // nobody
+	e.json("PUT", "/api/v1/ai/faces", alice, map[string]any{"model": facesModel, "items": items}, 200, nil)
+	e.json("GET", "/api/v1/ai/faces/todo?model="+facesModel, alice, nil, 200, &todo)
+	if todo.Remaining != 0 {
+		t.Errorf("still to look at: %d", todo.Remaining)
+	}
+	if err := e.srv.regroup(ctx, aliceID); err != nil {
+		t.Fatal(err)
+	}
+
+	type list struct{ People []Person }
+	var ps list
+	e.json("GET", "/api/v1/people", alice, nil, 200, &ps)
+	if len(ps.People) != 2 || len(ps.People[0].AssetIDs) != 4 || len(ps.People[1].AssetIDs) != 3 || ps.People[0].Cover == 0 {
+		t.Fatalf("people: %+v", ps.People)
+	}
+	a, b := ps.People[0], ps.People[1]
+	var bobs list
+	e.json("GET", "/api/v1/people", bob, nil, 200, &bobs)
+	if len(bobs.People) != 0 {
+		t.Errorf("bob sees alice's people: %+v", bobs.People)
+	}
+
+	// A name sticks when the next photo of A arrives.
+	e.json("PATCH", fmt.Sprintf("/api/v1/people/%d", a.ID), alice, map[string]any{"name": "Anna"}, 204, nil)
+	e.json("PATCH", fmt.Sprintf("/api/v1/people/%d", a.ID), bob, map[string]any{"name": "x"}, 404, nil)
+	extra := e.upload(alice, "p9.jpg", testJPEG(t, 120, 90, 170, false), 201)
+	e.json("PUT", "/api/v1/ai/faces", alice, map[string]any{"model": facesModel, "items": []any{
+		map[string]any{"sha256": sha(extra), "faces": []any{faceOf(0, 9)}}}}, 200, nil)
+	e.srv.regroup(ctx, aliceID)
+	e.json("GET", "/api/v1/people", alice, nil, 200, &ps)
+	if ps.People[0].ID != a.ID || ps.People[0].Name != "Anna" || len(ps.People[0].AssetIDs) != 5 {
+		t.Fatalf("after a new photo: %+v", ps.People)
+	}
+
+	// The faces of a photo, with names.
+	var fs struct{ Faces []FaceRef }
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d/faces", photos[0].ID), alice, nil, 200, &fs)
+	if len(fs.Faces) != 1 || fs.Faces[0].Name != "Anna" || fs.Faces[0].Box[2] != 0.3 {
+		t.Errorf("faces of a photo: %+v", fs)
+	}
+	// A face thumbnail, for its owner only.
+	res := e.do("GET", fmt.Sprintf("/api/v1/faces/%d/thumb", a.Cover), alice, nil, nil)
+	if img, err := jpeg.Decode(res.Body); err != nil || img.Bounds().Dx() != 200 {
+		t.Errorf("face thumb: %v", err)
+	}
+	if res := e.do("GET", fmt.Sprintf("/api/v1/faces/%d/thumb", a.Cover), bob, nil, nil); res.StatusCode != 404 {
+		t.Errorf("bob gets alice's face: %d", res.StatusCode)
+	}
+
+	// Not Anna: the face leaves and does not come back.
+	wrong := fs.Faces[0].ID
+	e.json("DELETE", fmt.Sprintf("/api/v1/people/%d/faces/%d", a.ID, wrong), alice, nil, 204, nil)
+	e.srv.regroup(ctx, aliceID)
+	fs.Faces = nil // fresh: a field left out of the JSON would keep its old value
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d/faces", photos[0].ID), alice, nil, 200, &fs)
+	if fs.Faces[0].Person == a.ID {
+		t.Error("rejected face came back")
+	}
+
+	// B is Anna too: merged, and it stays so.
+	e.json("POST", fmt.Sprintf("/api/v1/people/%d/merge", a.ID), alice, map[string][]int64{"ids": {b.ID}}, 204, nil)
+	e.srv.regroup(ctx, aliceID)
+	ps = list{}
+	e.json("GET", "/api/v1/people", alice, nil, 200, &ps)
+	if len(ps.People) != 1 || ps.People[0].ID != a.ID || len(ps.People[0].AssetIDs) != 7 {
+		t.Errorf("after merging: %+v", ps.People)
+	}
+	// Hidden people are still listed, marked, for the app to leave out.
+	e.json("PATCH", fmt.Sprintf("/api/v1/people/%d", a.ID), alice, map[string]any{"hidden": true}, 204, nil)
+	e.json("GET", "/api/v1/people", alice, nil, 200, &ps)
+	if !ps.People[0].Hidden {
+		t.Error("hidden not kept")
+	}
+}

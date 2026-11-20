@@ -34,6 +34,11 @@ var files = map[string]modelFile{
 		"fe0fda7c425b48c516fc8f160d594c8022a0808447475c1a7c6d6479763f310c", 995526},
 	"dense": {"dense.safetensors", hf + "sentence-transformers/clip-ViT-B-32-multilingual-v1/resolve/main/2_Dense/model.safetensors",
 		"d12568dc7300970a4d3dbb49068ad16cd89b99840b74b026f8e48071e9414f74", 1572984},
+	// Faces: YuNet finds them (MIT), SFace recognises them (Apache 2.0), from OpenCV Zoo.
+	"yunet": {"yunet.onnx", hf + "opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx",
+		"8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4", 232589},
+	"sface": {"sface.onnx", hf + "opencv/face_recognition_sface/resolve/main/face_recognition_sface_2021dec.onnx",
+		"0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79", 38696353},
 }
 
 func modelDir() string {
