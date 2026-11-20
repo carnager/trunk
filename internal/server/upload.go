@@ -4,7 +4,8 @@ package server
 // termination extensions (https://tus.io/protocols/resumable-upload).
 //
 // Metadata keys understood in Upload-Metadata: filename (required), mtime
-// (unix ms), sha256 (hex; verified on completion). When the last PATCH
+// (unix ms), sha256 (hex; verified on completion), source_sha256 (hex; see
+// handleSimpleUpload). When the last PATCH
 // completes the upload, its response carries Trunk-Asset-Id and
 // Trunk-Asset-Created; HEAD on a completed upload returns them again, so a
 // client that lost the final response can still learn the outcome.
@@ -33,6 +34,7 @@ type upload struct {
 	Offset   int64
 	Filename string
 	SHA256   string
+	Source   string
 	Mtime    sql.NullInt64
 	AssetID  sql.NullInt64
 }
@@ -93,8 +95,8 @@ func (s *Server) handleTusCreate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "Upload-Metadata must include filename")
 		return
 	}
-	sha := strings.ToLower(md["sha256"])
-	if sha != "" && !reSHA.MatchString(sha) {
+	sha, source := strings.ToLower(md["sha256"]), strings.ToLower(md["source_sha256"])
+	if (sha != "" && !reSHA.MatchString(sha)) || (source != "" && !reSHA.MatchString(source)) {
 		httpError(w, http.StatusBadRequest, "bad sha256 in Upload-Metadata")
 		return
 	}
@@ -112,9 +114,9 @@ func (s *Server) handleTusCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	f.Close()
 	now := time.Now().UnixMilli()
-	_, err = s.db.ExecContext(r.Context(), `INSERT INTO uploads (id, user_id, length, filename, sha256, mtime,
-		created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, sess.UserID, length, md["filename"], sha, mtime, now, now)
+	_, err = s.db.ExecContext(r.Context(), `INSERT INTO uploads (id, user_id, length, filename, sha256,
+		source_sha256, mtime, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, sess.UserID, length, md["filename"], sha, source, mtime, now, now)
 	if err != nil {
 		os.Remove(s.uploadPath(id))
 		s.internal(w, err)
@@ -127,9 +129,9 @@ func (s *Server) handleTusCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) loadUpload(w http.ResponseWriter, r *http.Request) (*upload, bool) {
 	var u upload
-	err := s.db.QueryRowContext(r.Context(), `SELECT id, user_id, length, offset, filename, sha256, mtime, asset_id
-		FROM uploads WHERE id = ? AND user_id = ?`, r.PathValue("id"), sessionFrom(r).UserID).
-		Scan(&u.ID, &u.UserID, &u.Length, &u.Offset, &u.Filename, &u.SHA256, &u.Mtime, &u.AssetID)
+	err := s.db.QueryRowContext(r.Context(), `SELECT id, user_id, length, offset, filename, sha256, source_sha256,
+		mtime, asset_id FROM uploads WHERE id = ? AND user_id = ?`, r.PathValue("id"), sessionFrom(r).UserID).
+		Scan(&u.ID, &u.UserID, &u.Length, &u.Offset, &u.Filename, &u.SHA256, &u.Source, &u.Mtime, &u.AssetID)
 	if errors.Is(err, sql.ErrNoRows) {
 		w.WriteHeader(http.StatusNotFound) // tus: HEAD responses have no body
 		return nil, false
@@ -283,7 +285,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, u *uploa
 		mtime = &t
 	}
 	ok := s.finishIngest(w, r, ingestReq{
-		UserID: sess.UserID, UserName: sess.UserName, TmpPath: work, Name: u.Filename, SHA256: sum, Mtime: mtime,
+		UserID: sess.UserID, UserName: sess.UserName, TmpPath: work, Name: u.Filename, SHA256: sum, Source: u.Source, Mtime: mtime,
 	}, func(a *Asset, created bool) {
 		s.db.ExecContext(r.Context(), `UPDATE uploads SET asset_id = ?, updated_at = ? WHERE id = ?`,
 			a.ID, time.Now().UnixMilli(), u.ID)

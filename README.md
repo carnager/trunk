@@ -42,7 +42,7 @@ The API is described in [docs/api.md](docs/api.md).
 
 Done: accounts and per-device tokens, simple and resumable (tus) upload with SHA-256
 deduplication, metadata (EXIF, QuickTime, file names), thumbnails and video posters, delta sync,
-favourites, trash with expiry.
+favourites, trash with expiry, edits that keep the first upload.
 
 Next: albums, Google Takeout import (`trunk import takeout`), then a small web UI and share
 links, then search and faces.

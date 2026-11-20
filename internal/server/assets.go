@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -48,19 +49,28 @@ type Asset struct {
 	ISO         int      `json:"iso,omitempty"`
 	FocalLength float64  `json:"focal_length,omitempty"`
 
+	// Set once the asset has been edited: the current file differs from the
+	// first upload, which /original still returns.
+	EditedAt       *time.Time `json:"edited_at,omitempty"`
+	OriginalSHA256 string     `json:"original_sha256,omitempty"`
+	OriginalSize   int64      `json:"original_size,omitempty"`
+	OriginalMIME   string     `json:"original_mime,omitempty"`
+
 	Favorite       bool       `json:"favorite"`
 	TrashedAt      *time.Time `json:"trashed_at,omitempty"`
 	TrashExpiresAt *time.Time `json:"trash_expires_at,omitempty"`
 	CreatedAt      *time.Time `json:"created_at,omitempty"`
 	UpdatedAt      *time.Time `json:"updated_at,omitempty"`
 
-	userID int64
-	path   string
+	userID   int64
+	path     string // current file, relative to the originals dir
+	origPath string // first upload, if edited
 }
 
 const assetCols = `id, user_id, seq, sha256, path, orig_name, kind, mime, size, taken_at, tz_offset,
 	width, height, orientation, duration_ms, lat, lon, alt, make, model, lens, f_number, exposure, iso,
-	focal_length, favorite, trashed_at, deleted_at, created_at, updated_at`
+	focal_length, favorite, trashed_at, deleted_at, created_at, updated_at,
+	orig_path, orig_sha256, orig_size, orig_mime, edited_at`
 
 type scanner interface{ Scan(...any) error }
 
@@ -73,10 +83,13 @@ func (s *Server) scanAsset(sc scanner) (*Asset, error) {
 		mk, model, lens                  sql.NullString
 		fav                              int
 		trashed, deleted                 sql.NullInt64
+		oPath, oSHA, oMIME               sql.NullString
+		oSize, edited                    sql.NullInt64
 	)
 	err := sc.Scan(&a.ID, &a.userID, &a.Seq, &a.SHA256, &a.path, &a.Name, &a.Kind, &a.MIME, &a.Size,
 		&taken, &tz, &w, &h, &orient, &dur, &lat, &lon, &alt, &mk, &model, &lens, &fnum, &expo, &iso,
-		&focal, &fav, &trashed, &deleted, &created, &updated)
+		&focal, &fav, &trashed, &deleted, &created, &updated,
+		&oPath, &oSHA, &oSize, &oMIME, &edited)
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +115,11 @@ func (s *Server) scanAsset(sc scanner) (*Asset, error) {
 		tt := time.UnixMilli(trashed.Int64).UTC()
 		exp := tt.AddDate(0, 0, s.cfg.TrashDays)
 		a.TrashedAt, a.TrashExpiresAt = &tt, &exp
+	}
+	if edited.Valid {
+		e := time.UnixMilli(edited.Int64).UTC()
+		a.EditedAt = &e
+		a.origPath, a.OriginalSHA256, a.OriginalSize, a.OriginalMIME = oPath.String, oSHA.String, oSize.Int64, oMIME.String
 	}
 	c, u := time.UnixMilli(created).UTC(), time.UnixMilli(updated).UTC()
 	a.CreatedAt, a.UpdatedAt = &c, &u
@@ -200,7 +218,9 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 var reSHA = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // handleCheck tells a client which of its files the server already has, so it
-// can skip uploading them. Trashed assets count as present.
+// can skip uploading them. Every hash an asset is known by counts: the first
+// upload, the client's source before shrinking, the current edit. Trashed
+// assets count as present.
 func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r)
 	var req struct {
@@ -220,14 +240,13 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusBadRequest, "bad sha256: "+h)
 			return
 		}
-		var id int64
-		err := s.db.QueryRowContext(r.Context(),
-			`SELECT id FROM assets WHERE user_id = ? AND sha256 = ? AND deleted_at IS NULL`, sess.UserID, h).Scan(&id)
-		if err == nil {
-			found[h] = id
-		} else if !errors.Is(err, sql.ErrNoRows) {
+		id, ok, err := s.findBySHA(r.Context(), sess.UserID, h)
+		if err != nil {
 			s.internal(w, err)
 			return
+		}
+		if ok {
+			found[h] = id
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"existing": found})
@@ -351,8 +370,9 @@ func (s *Server) purge(ctx context.Context, userID int64, ids []int64) (int, err
 	n := 0
 	for _, id := range ids {
 		var rel, sha string
-		err := s.db.QueryRowContext(ctx, `SELECT path, sha256 FROM assets
-			WHERE id = ? AND user_id = ? AND trashed_at IS NOT NULL AND deleted_at IS NULL`, id, userID).Scan(&rel, &sha)
+		var orig sql.NullString
+		err := s.db.QueryRowContext(ctx, `SELECT path, sha256, orig_path FROM assets
+			WHERE id = ? AND user_id = ? AND trashed_at IS NOT NULL AND deleted_at IS NULL`, id, userID).Scan(&rel, &sha, &orig)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		} else if err != nil {
@@ -361,8 +381,13 @@ func (s *Server) purge(ctx context.Context, userID int64, ids []int64) (int, err
 		if err := s.tombstone(ctx, id); err != nil {
 			return n, err
 		}
-		if err := os.Remove(filepath.Join(s.originals, filepath.FromSlash(rel))); err != nil && !os.IsNotExist(err) {
-			s.log.Warn("removing original", "path", rel, "err", err)
+		for _, p := range []string{rel, orig.String} {
+			if p == "" {
+				continue
+			}
+			if err := os.Remove(filepath.Join(s.originals, filepath.FromSlash(p))); err != nil && !os.IsNotExist(err) {
+				s.log.Warn("removing file", "path", p, "err", err)
+			}
 		}
 		s.removeThumbsIfUnused(ctx, sha)
 		n++
@@ -381,21 +406,46 @@ func (s *Server) tombstone(ctx context.Context, id int64) error {
 		return err
 	}
 	now := time.Now().UnixMilli()
-	if _, err := tx.ExecContext(ctx, `UPDATE assets SET deleted_at = ?, path = '', seq = ?, updated_at = ?
-		WHERE id = ?`, now, seq, now, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE assets SET deleted_at = ?, path = '', orig_path = NULL,
+		seq = ?, updated_at = ? WHERE id = ?`, now, seq, now, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM asset_hashes WHERE asset_id = ?`, id); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
+// handleFile serves the asset's current file: the edit if there is one.
+func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.assetFromPath(w, r)
+	if !ok {
+		return
+	}
+	name := a.Name
+	if a.EditedAt != nil {
+		name = path.Base(a.path) // the edit may have another extension
+	}
+	s.serveFile(w, r, a.path, a.MIME, name, a.SHA256)
+}
+
+// handleOriginal serves the file as first uploaded, even after edits.
 func (s *Server) handleOriginal(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.assetFromPath(w, r)
 	if !ok {
 		return
 	}
-	f, err := os.Open(filepath.Join(s.originals, filepath.FromSlash(a.path)))
+	if a.EditedAt != nil {
+		s.serveFile(w, r, a.origPath, a.OriginalMIME, a.Name, a.OriginalSHA256)
+		return
+	}
+	s.serveFile(w, r, a.path, a.MIME, a.Name, a.SHA256)
+}
+
+func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, rel, mimeType, name, sha string) {
+	f, err := os.Open(filepath.Join(s.originals, filepath.FromSlash(rel)))
 	if err != nil {
-		s.internal(w, fmt.Errorf("asset %d: %w", a.ID, err))
+		s.internal(w, fmt.Errorf("serving %s: %w", rel, err))
 		return
 	}
 	defer f.Close()
@@ -404,9 +454,9 @@ func (s *Server) handleOriginal(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", a.MIME)
-	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": a.Name}))
-	w.Header().Set("ETag", `"`+a.SHA256+`"`)
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": name}))
+	w.Header().Set("ETag", `"`+sha+`"`)
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 	// ServeContent handles Range, so videos stream and seek.
 	http.ServeContent(w, r, "", st.ModTime(), f)

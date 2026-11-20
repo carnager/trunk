@@ -117,7 +117,10 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/v1/assets", s.auth(s.handleSimpleUpload))
 	m.HandleFunc("GET /api/v1/assets/{id}", s.auth(s.handleGetAsset))
 	m.HandleFunc("PATCH /api/v1/assets/{id}", s.auth(s.handlePatchAsset))
+	m.HandleFunc("GET /api/v1/assets/{id}/file", s.auth(s.handleFile))
 	m.HandleFunc("GET /api/v1/assets/{id}/original", s.auth(s.handleOriginal))
+	m.HandleFunc("PUT /api/v1/assets/{id}/edit", s.auth(s.handlePutEdit))
+	m.HandleFunc("DELETE /api/v1/assets/{id}/edit", s.auth(s.handleDeleteEdit))
 	m.HandleFunc("GET /api/v1/assets/{id}/thumb/{size}", s.auth(s.handleThumb))
 	m.HandleFunc("POST /api/v1/assets/trash", s.auth(s.handleTrash))
 	m.HandleFunc("POST /api/v1/assets/restore", s.auth(s.handleRestore))
@@ -146,6 +149,8 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 		"features": map[string]bool{
 			"video_posters": media.HaveFFmpeg(),
 			"tus":           true,
+			"edits":         true,
+			"source_sha256": true,
 		},
 		"thumb_sizes": media.Sizes,
 	})

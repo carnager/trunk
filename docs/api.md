@@ -36,6 +36,7 @@ reports `version`, `api`, `trash_days`, `max_upload`, `thumb_sizes` and `feature
   "make": "Google", "model": "Pixel 5", "lens": "…",
   "f_number": 1.73, "exposure": 0.042, "iso": 622, "focal_length": 4.38,
   "duration_ms": 32777,
+  "edited_at": "…", "original_sha256": "…", "original_size": 3100000, "original_mime": "image/heic",
   "favorite": false, "trashed_at": null, "trash_expires_at": null,
   "created_at": "…", "updated_at": "…"
 }
@@ -57,11 +58,28 @@ reports `version`, `api`, `trash_days`, `max_upload`, `thumb_sizes` and `feature
 |---|---|
 | `GET /assets/{id}` | one asset |
 | `PATCH /assets/{id}` | `{"favorite": true}` → the updated asset |
-| `GET /assets/{id}/original` | the file as uploaded; supports `Range` for video seeking |
+| `GET /assets/{id}/file` | the current file (the edit, if there is one); supports `Range` for video seeking. Use this to show or share. |
+| `GET /assets/{id}/original` | the file as first uploaded, even after edits |
+| `PUT /assets/{id}/edit` | raw bytes of an edited photo (`X-Sha256` optional) → the updated asset. See *Edits*. |
+| `DELETE /assets/{id}/edit` | back to the first upload → the updated asset |
 | `GET /assets/{id}/thumb/{size}` | JPEG, upright. `small`: short side 300 px; `medium`: short side 480 px; `preview`: long side 2048 px. Never upscaled. Videos get a poster frame from about 1 s in. `404` if the file cannot be rendered. Supports `If-None-Match`. |
 | `POST /assets/trash` | `{"ids": [..]}` → `204` |
 | `POST /assets/restore` | `{"ids": [..]}` → `204` |
 | `POST /assets/delete` | `{"ids": [..]}` → `{"deleted": n}`. Only trashed assets are deleted; others are skipped. The trash is also emptied automatically after `trash_days`. |
+
+## Edits
+
+An edit replaces what a photo shows without losing the upload: the first upload stays on disk
+next to the edit (`IMG_1234.heic`, `IMG_1234_edit.jpg`) and `/original` keeps serving it. Editing
+again replaces the previous edit; only the first upload is kept forever.
+
+After an edit, `sha256`, `size`, `mime`, `width`, `height`, `orientation` and the thumbnails
+describe the edit, and `edited_at` plus `original_sha256`/`original_size`/`original_mime`
+describe what was first uploaded. When and where the photo was taken and the camera data stay as
+they were. The change gets a new `seq`, so other devices pick it up with their next sync.
+
+`PUT` returns `409` with `asset_id` if the file is already another asset, `415` if it is not a
+photo, and treats a file identical to the first upload as a revert. Videos cannot be edited.
 
 ## Delta sync
 
@@ -76,6 +94,9 @@ edits, favourites, trash and restore. Deleted assets come back as tombstones:
 while `more` is true, fetch again straight away. `since=0` (or no `since`) is a full sync and
 leaves out tombstones. `limit` is capped at 1000.
 
+Trashed assets are part of the feed like any other (with `trashed_at` set), so a client builds
+its trash view from the same data.
+
 ## Upload
 
 Before uploading, ask which files the server already has:
@@ -85,14 +106,19 @@ POST /assets/check   {"sha256": ["…", "…"]}   (up to 5000)
 → {"existing": {"<sha256>": <asset id>}}
 ```
 
-Trashed assets count as existing. Uploads are deduplicated per user by SHA-256 either way;
-uploading a file again returns the existing asset.
+An asset is known by every hash it ever had: the first upload, the client's source file (see
+below) and its current edit. Trashed assets count as existing. Uploads are deduplicated per user
+by these hashes either way; uploading a file again returns the existing asset.
+
+Clients that shrink photos before uploading pass `source_sha256`, the hash of the file as it is
+on the device. Check with that hash before shrinking; the server then recognises the photo no
+matter how it was compressed.
 
 **Simple upload**, for photos:
 
 ```
-POST /assets?filename=IMG_1234.jpg&mtime=<unix ms>
-X-Sha256: <hex>          optional; if the server has it, the body is not read
+POST /assets?filename=IMG_1234.jpg&mtime=<unix ms>&source_sha256=<hex>
+X-Sha256: <hex>          optional; if the server has it (or source_sha256), the body is not read
 <raw file bytes>
 → 201 {"asset": {...}, "created": true}   or   200 {"asset": {...}, "created": false}
 ```
@@ -105,7 +131,7 @@ termination extensions), for videos and slow connections. Any tus client library
 POST /uploads
 Tus-Resumable: 1.0.0
 Upload-Length: 104857600
-Upload-Metadata: filename <b64>,mtime <b64 unix ms>,sha256 <b64 hex>
+Upload-Metadata: filename <b64>,mtime <b64 unix ms>,sha256 <b64 hex>,source_sha256 <b64 hex>
 → 201  Location: /api/v1/uploads/<id>
 
 PATCH /uploads/<id>    Upload-Offset: n   Content-Type: application/offset+octet-stream

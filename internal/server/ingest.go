@@ -28,6 +28,7 @@ type ingestReq struct {
 	TmpPath  string     // removed or moved into the library by ingest
 	Name     string     // original file name from the client
 	SHA256   string     // computed hash
+	Source   string     // optional: hash of the client's file before it shrank it
 	Mtime    *time.Time // client-side file time, last resort for taken_at
 }
 
@@ -42,10 +43,7 @@ func (s *Server) ingest(ctx context.Context, q ingestReq) (a *Asset, created boo
 			os.Remove(q.TmpPath)
 		}
 	}()
-	if id, ok, err := s.findBySHA(ctx, q.UserID, q.SHA256); err != nil {
-		return nil, false, err
-	} else if ok {
-		a, err := s.getAsset(ctx, q.UserID, id)
+	if a, err := s.existing(ctx, q); a != nil || err != nil {
 		return a, false, err
 	}
 
@@ -74,10 +72,7 @@ func (s *Server) ingest(ctx context.Context, q ingestReq) (a *Asset, created boo
 	s.ingestMu.Lock()
 	defer s.ingestMu.Unlock()
 	// Check again: a parallel upload of the same file may have won the race.
-	if id, ok, err := s.findBySHA(ctx, q.UserID, q.SHA256); err != nil {
-		return nil, false, err
-	} else if ok {
-		a, err := s.getAsset(ctx, q.UserID, id)
+	if a, err := s.existing(ctx, q); a != nil || err != nil {
 		return a, false, err
 	}
 
@@ -108,10 +103,29 @@ func (s *Server) ingest(ctx context.Context, q ingestReq) (a *Asset, created boo
 	return a, true, err
 }
 
+// existing returns the asset the upload duplicates, by its own hash or its
+// source hash, or nil.
+func (s *Server) existing(ctx context.Context, q ingestReq) (*Asset, error) {
+	for _, h := range []string{q.SHA256, q.Source} {
+		if h == "" {
+			continue
+		}
+		id, ok, err := s.findBySHA(ctx, q.UserID, h)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return s.getAsset(ctx, q.UserID, id)
+		}
+	}
+	return nil, nil
+}
+
+// findBySHA looks a hash up among everything the user's assets are known by.
 func (s *Server) findBySHA(ctx context.Context, userID int64, sha string) (int64, bool, error) {
 	var id int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id FROM assets WHERE user_id = ? AND sha256 = ? AND deleted_at IS NULL`, userID, sha).Scan(&id)
+		`SELECT asset_id FROM asset_hashes WHERE user_id = ? AND sha256 = ?`, userID, sha).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -169,7 +183,21 @@ func (s *Server) insertAsset(ctx context.Context, q ingestReq, rel string, in me
 	if err != nil {
 		return 0, err
 	}
+	if err := addHash(ctx, tx, q.UserID, q.SHA256, id, "original"); err != nil {
+		return 0, err
+	}
+	if q.Source != "" && q.Source != q.SHA256 {
+		if err := addHash(ctx, tx, q.UserID, q.Source, id, "source"); err != nil {
+			return 0, err
+		}
+	}
 	return id, tx.Commit()
+}
+
+func addHash(ctx context.Context, x db.Execer, userID int64, sha string, assetID int64, kind string) error {
+	_, err := x.ExecContext(ctx, `INSERT INTO asset_hashes (user_id, sha256, asset_id, kind) VALUES (?, ?, ?, ?)`,
+		userID, sha, assetID, kind)
+	return err
 }
 
 func nz[T int | int64](v T) any {
@@ -263,8 +291,11 @@ func hashFile(p string) (string, error) {
 
 // handleSimpleUpload takes a whole file as the request body:
 //
-//	POST /api/v1/assets?filename=IMG_1234.jpg&mtime=<unix ms>
+//	POST /api/v1/assets?filename=IMG_1234.jpg&mtime=<unix ms>&source_sha256=<hex>
 //	X-Sha256: <hex>   (optional; verified when present)
+//
+// source_sha256 is for clients that shrink photos before sending: the hash of
+// the file as it is on the device, so it is recognised again later.
 //
 // Use it for photos; large videos over mobile networks belong on tus.
 func (s *Server) handleSimpleUpload(w http.ResponseWriter, r *http.Request) {
@@ -279,20 +310,18 @@ func (s *Server) handleSimpleUpload(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "bad X-Sha256")
 		return
 	}
-	if want != "" {
-		if id, ok, err := s.findBySHA(r.Context(), sess.UserID, want); err != nil {
-			s.internal(w, err)
-			return
-		} else if ok {
-			// Already there; skip reading the body at all.
-			a, err := s.getAsset(r.Context(), sess.UserID, id)
-			if err != nil {
-				s.internal(w, err)
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"asset": a, "created": false})
-			return
-		}
+	source := strings.ToLower(r.URL.Query().Get("source_sha256"))
+	if source != "" && !reSHA.MatchString(source) {
+		httpError(w, http.StatusBadRequest, "bad source_sha256")
+		return
+	}
+	// Already there? Then the body need not be read at all.
+	if a, err := s.existing(r.Context(), ingestReq{UserID: sess.UserID, SHA256: want, Source: source}); err != nil {
+		s.internal(w, err)
+		return
+	} else if a != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"asset": a, "created": false})
+		return
 	}
 	tmp, sum, _, err := s.receive(http.MaxBytesReader(w, r.Body, s.cfg.MaxUpload))
 	if err != nil {
@@ -311,7 +340,7 @@ func (s *Server) handleSimpleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.finishIngest(w, r, ingestReq{
-		UserID: sess.UserID, UserName: sess.UserName, TmpPath: tmp, Name: name, SHA256: sum,
+		UserID: sess.UserID, UserName: sess.UserName, TmpPath: tmp, Name: name, SHA256: sum, Source: source,
 		Mtime: parseMillis(r.URL.Query().Get("mtime")),
 	}, nil)
 }

@@ -623,3 +623,170 @@ func TestVideo(t *testing.T) {
 		t.Errorf("poster: %v %v", err, img.Bounds())
 	}
 }
+
+func TestSourceHash(t *testing.T) {
+	e := newEnv(t)
+	tok := e.login("alice", "phone")
+	source := strings.Repeat("ab", 32) // the phone's original, never uploaded itself
+	small := testJPEG(t, 300, 200, 21, false)
+	res := e.do("POST", "/api/v1/assets?filename=big.jpg&source_sha256="+source, tok, bytes.NewReader(small), nil)
+	if res.StatusCode != 201 {
+		t.Fatalf("upload: %d", res.StatusCode)
+	}
+	var up uploadResult
+	json.NewDecoder(res.Body).Decode(&up)
+
+	var chk struct{ Existing map[string]int64 }
+	chk.Existing = nil
+	e.json("POST", "/api/v1/assets/check", tok, map[string]any{"sha256": []string{source}}, 200, &chk)
+	if chk.Existing[source] != up.Asset.ID {
+		t.Errorf("source hash not known: %+v", chk)
+	}
+	// Shrunk differently next time: still recognised by the source, body not needed.
+	res = e.do("POST", "/api/v1/assets?filename=big.jpg&source_sha256="+source, tok,
+		bytes.NewReader(testJPEG(t, 200, 100, 22, false)), nil)
+	var again uploadResult
+	json.NewDecoder(res.Body).Decode(&again)
+	if res.StatusCode != 200 || again.Asset.ID != up.Asset.ID {
+		t.Errorf("re-upload with same source: %d id %d", res.StatusCode, again.Asset.ID)
+	}
+	// Other users are not affected.
+	bob := e.login("bob", "phone")
+	chk.Existing = nil
+	e.json("POST", "/api/v1/assets/check", bob, map[string]any{"sha256": []string{source}}, 200, &chk)
+	if len(chk.Existing) != 0 {
+		t.Error("bob sees alice's source hash")
+	}
+	// Deleting for good forgets every hash.
+	e.json("POST", "/api/v1/assets/trash", tok, map[string][]int64{"ids": {up.Asset.ID}}, 204, nil)
+	e.json("POST", "/api/v1/assets/delete", tok, map[string][]int64{"ids": {up.Asset.ID}}, 200, nil)
+	chk.Existing = nil
+	e.json("POST", "/api/v1/assets/check", tok, map[string]any{"sha256": []string{source, up.Asset.SHA256}}, 200, &chk)
+	if len(chk.Existing) != 0 {
+		t.Errorf("hashes survive deletion: %+v", chk)
+	}
+}
+
+func TestEdits(t *testing.T) {
+	e := newEnv(t)
+	tok := e.login("alice", "phone")
+	orig := testJPEG(t, 1200, 800, 31, true) // orientation 6, shown as 800x1200
+	a := e.upload(tok, "IMG_0042.jpg", orig, 201)
+	thumb := func(id int64) image.Point {
+		res := e.do("GET", fmt.Sprintf("/api/v1/assets/%d/thumb/preview", id), tok, nil, nil)
+		img, err := jpeg.Decode(res.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return img.Bounds().Size()
+	}
+	thumb(a.ID)
+
+	put := func(data []byte, want int) Asset {
+		t.Helper()
+		res := e.do("PUT", fmt.Sprintf("/api/v1/assets/%d/edit", a.ID), tok, bytes.NewReader(data), nil)
+		b, _ := io.ReadAll(res.Body)
+		if res.StatusCode != want {
+			t.Fatalf("PUT edit: %d, want %d: %s", res.StatusCode, want, b)
+		}
+		var out Asset
+		json.Unmarshal(b, &out)
+		return out
+	}
+	get := func(path string) []byte {
+		t.Helper()
+		res := e.do("GET", fmt.Sprintf("/api/v1/assets/%d/%s", a.ID, path), tok, nil, nil)
+		b, _ := io.ReadAll(res.Body)
+		return b
+	}
+
+	// A crop: upright already, no EXIF, different size.
+	edit := testJPEG(t, 500, 700, 32, false)
+	ed := put(edit, 200)
+	if ed.EditedAt == nil || ed.OriginalSHA256 != a.SHA256 || ed.OriginalSize != a.Size {
+		t.Fatalf("edited asset: %+v", ed)
+	}
+	if ed.Width != 500 || ed.Height != 700 || ed.Orientation != 0 || ed.Size != int64(len(edit)) {
+		t.Errorf("edit dims %dx%d orientation %d size %d", ed.Width, ed.Height, ed.Orientation, ed.Size)
+	}
+	if !ed.TakenAt.Equal(*a.TakenAt) || ed.Make != "Google" || ed.Lat == nil {
+		t.Errorf("edit lost when/where/camera: %+v", ed)
+	}
+	if ed.Seq <= a.Seq {
+		t.Error("edit did not bump seq")
+	}
+	if !bytes.Equal(get("file"), edit) || !bytes.Equal(get("original"), orig) {
+		t.Error("file/original do not serve edit/first upload")
+	}
+	if got := thumb(a.ID); got != (image.Point{500, 700}) {
+		t.Errorf("thumbnail after edit: %v", got)
+	}
+	for _, f := range []string{"IMG_0042.jpg", "IMG_0042_edit.jpg"} {
+		if _, err := os.Stat(filepath.Join(e.srv.originals, "alice", "2024", "06", f)); err != nil {
+			t.Errorf("%s: %v", f, err)
+		}
+	}
+
+	// All three hashes are known; the phone will not upload the original again.
+	var chk struct{ Existing map[string]int64 }
+	chk.Existing = nil
+	e.json("POST", "/api/v1/assets/check", tok, map[string]any{"sha256": []string{a.SHA256, ed.SHA256}}, 200, &chk)
+	if len(chk.Existing) != 2 {
+		t.Errorf("check after edit: %+v", chk)
+	}
+	if e.upload(tok, "IMG_0042.jpg", orig, 200).ID != a.ID {
+		t.Error("original uploaded again as a new asset")
+	}
+
+	// Editing again replaces the edit, not the original.
+	edit2 := testJPEG(t, 400, 400, 33, false)
+	ed2 := put(edit2, 200)
+	if ed2.OriginalSHA256 != a.SHA256 || ed2.Width != 400 {
+		t.Errorf("second edit: %+v", ed2)
+	}
+	if _, err := os.Stat(filepath.Join(e.srv.originals, "alice", "2024", "06", "IMG_0042_edit.jpg")); !os.IsNotExist(err) {
+		// the second edit took the _edit name only after the first was removed
+		files, _ := os.ReadDir(filepath.Join(e.srv.originals, "alice", "2024", "06"))
+		if len(files) != 2 {
+			t.Errorf("files after second edit: %v", files)
+		}
+	}
+	chk.Existing = nil
+	e.json("POST", "/api/v1/assets/check", tok, map[string]any{"sha256": []string{ed.SHA256}}, 200, &chk)
+	if len(chk.Existing) != 0 {
+		t.Error("replaced edit's hash still known")
+	}
+
+	// Another asset's file cannot become this one's edit.
+	other := testJPEG(t, 100, 100, 34, false)
+	e.upload(tok, "other.jpg", other, 201)
+	put(other, 409)
+	put([]byte("not an image at all"), 415)
+
+	// Revert.
+	e.json("DELETE", fmt.Sprintf("/api/v1/assets/%d/edit", a.ID), tok, nil, 200, nil)
+	var back Asset
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", a.ID), tok, nil, 200, &back)
+	if back.EditedAt != nil || back.SHA256 != a.SHA256 || back.Width != 800 || back.Orientation != 6 {
+		t.Errorf("after revert: %+v", back)
+	}
+	if !bytes.Equal(get("file"), orig) {
+		t.Error("file after revert is not the original")
+	}
+	if got := thumb(a.ID); got != (image.Point{800, 1200}) {
+		t.Errorf("thumbnail after revert: %v", got)
+	}
+	files, _ := os.ReadDir(filepath.Join(e.srv.originals, "alice", "2024", "06"))
+	if len(files) != 1 {
+		t.Errorf("edit files left after revert: %v", files)
+	}
+
+	// Edit, then delete for good: both files go.
+	put(edit, 200)
+	e.json("POST", "/api/v1/assets/trash", tok, map[string][]int64{"ids": {a.ID}}, 204, nil)
+	e.json("POST", "/api/v1/assets/delete", tok, map[string][]int64{"ids": {a.ID}}, 200, nil)
+	files, _ = os.ReadDir(filepath.Join(e.srv.originals, "alice", "2024", "06"))
+	if len(files) != 0 {
+		t.Errorf("files left after delete: %v", files)
+	}
+}

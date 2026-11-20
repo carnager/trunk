@@ -105,6 +105,38 @@ CREATE TABLE uploads (
 	updated_at INTEGER NOT NULL
 );
 `,
+	// 2: edit versions, and every hash an asset is known by for deduplication
+	`
+-- The assets.sha256/path/size/mime/width/height/orientation columns describe the
+-- current file. Once an asset is edited, orig_* keep the first upload.
+ALTER TABLE assets ADD COLUMN orig_path TEXT;
+ALTER TABLE assets ADD COLUMN orig_sha256 TEXT;
+ALTER TABLE assets ADD COLUMN orig_size INTEGER;
+ALTER TABLE assets ADD COLUMN orig_mime TEXT;
+ALTER TABLE assets ADD COLUMN orig_width INTEGER;
+ALTER TABLE assets ADD COLUMN orig_height INTEGER;
+ALTER TABLE assets ADD COLUMN orig_orientation INTEGER;
+ALTER TABLE assets ADD COLUMN edited_at INTEGER;
+
+-- kind: original (first upload), source (the client's file before it shrank it),
+-- edit (the current edited version).
+CREATE TABLE asset_hashes (
+	user_id  INTEGER NOT NULL,
+	sha256   TEXT NOT NULL,
+	asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+	kind     TEXT NOT NULL,
+	PRIMARY KEY (user_id, sha256)
+);
+CREATE INDEX asset_hashes_asset ON asset_hashes(asset_id);
+INSERT INTO asset_hashes (user_id, sha256, asset_id, kind)
+	SELECT user_id, sha256, id, 'original' FROM assets WHERE deleted_at IS NULL;
+
+-- Uniqueness now lives in asset_hashes; an edit may match no other rule.
+DROP INDEX assets_user_sha;
+CREATE INDEX assets_sha ON assets(sha256) WHERE deleted_at IS NULL;
+
+ALTER TABLE uploads ADD COLUMN source_sha256 TEXT NOT NULL DEFAULT '';
+`,
 }
 
 func migrate(d *sql.DB) error {
