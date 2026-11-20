@@ -16,7 +16,7 @@ conflicts=('trunk')
 backup=('etc/trunk/trunk-ai.env')
 install=trunk-photos.install
 source=("trunk-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('e159607133c0467948cbc45e5a2107f8c79cf7515052ea178fcb2f9623a89cf6')
 
 prepare() {
   cd "trunk-$pkgver"
