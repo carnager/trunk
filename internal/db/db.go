@@ -248,6 +248,16 @@ ALTER TABLE assets ADD COLUMN motion_path TEXT;
 ALTER TABLE assets ADD COLUMN motion_sha256 TEXT;
 CREATE INDEX assets_motion_sha ON assets (user_id, motion_sha256) WHERE motion_sha256 IS NOT NULL;
 `,
+	// 13: content search. A vector per file content and model, computed by
+	// an indexer elsewhere (trunk-ai); little-endian float32s, unit length.
+	`
+CREATE TABLE embeddings (
+	sha256 TEXT NOT NULL,
+	model  TEXT NOT NULL,
+	vec    BLOB NOT NULL,
+	PRIMARY KEY (sha256, model)
+);
+`,
 }
 
 func migrate(d *sql.DB) error {

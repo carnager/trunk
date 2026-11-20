@@ -1733,3 +1733,126 @@ func TestAdjust(t *testing.T) {
 	e.json("POST", "/api/v1/assets/adjust", alice, map[string]any{"ids": []int64{a.ID}, "local_time": "yesterday"}, 400, nil)
 	e.json("POST", "/api/v1/assets/adjust", alice, map[string]any{"ids": []int64{a.ID}, "place_id": 1}, 400, nil)
 }
+
+func TestContentSearch(t *testing.T) {
+	e := newEnv(t)
+	e.srv.db.Exec(`UPDATE users SET is_admin = 1 WHERE name = 'alice'`)
+	alice := e.login("alice", "desktop")
+	bob := e.login("bob", "phone")
+	a1 := e.upload(alice, "a1.jpg", testJPEG(t, 64, 48, 150, false), 201)
+	a2 := e.upload(alice, "a2.jpg", testJPEG(t, 64, 48, 151, false), 201)
+	a3 := e.upload(alice, "a3.jpg", testJPEG(t, 64, 48, 152, false), 201)
+	b1 := e.upload(bob, "b1.jpg", testJPEG(t, 64, 48, 153, false), 201)
+	const model = "clip-test"
+	vec := func(xs ...float32) string {
+		b := make([]byte, 0, len(xs)*4)
+		for _, x := range xs {
+			b = binary.LittleEndian.AppendUint32(b, math.Float32bits(x))
+		}
+		return base64.StdEncoding.EncodeToString(b)
+	}
+
+	// The indexer: what is missing, for the whole household; admin only.
+	var todo struct {
+		Assets []struct {
+			ID     int64
+			SHA256 string
+		}
+		Remaining int
+	}
+	e.json("GET", "/api/v1/ai/todo?model="+model, bob, nil, 403, nil)
+	e.json("GET", "/api/v1/ai/todo?model="+model, alice, nil, 200, &todo)
+	if todo.Remaining != 4 || len(todo.Assets) != 4 {
+		t.Fatalf("todo: %+v", todo)
+	}
+	if res := e.do("GET", fmt.Sprintf("/api/v1/ai/thumb/%d", b1.ID), alice, nil, nil); res.StatusCode != 200 || res.Header.Get("Content-Type") != "image/jpeg" {
+		t.Errorf("thumb for the indexer: %d", res.StatusCode)
+	}
+	sha := map[int64]string{}
+	for _, x := range todo.Assets {
+		sha[x.ID] = x.SHA256
+	}
+	// Unit vectors in 3 dimensions; the query (1,0,0) is close to a1, near a2, far from a3.
+	items := []map[string]string{
+		{"sha256": sha[a1.ID], "vec": vec(1, 0, 0)},
+		{"sha256": sha[a2.ID], "vec": vec(0.97, 0.243, 0)},
+		{"sha256": sha[a3.ID], "vec": vec(0, 1, 0)},
+		{"sha256": sha[b1.ID], "vec": vec(1, 0, 0)},
+	}
+	e.json("PUT", "/api/v1/ai/embeddings", bob, map[string]any{"model": model, "items": items}, 403, nil)
+	e.json("PUT", "/api/v1/ai/embeddings", alice, map[string]any{"model": model, "items": items}, 200, nil)
+	e.json("GET", "/api/v1/ai/todo?model="+model, alice, nil, 200, &todo)
+	if todo.Remaining != 0 {
+		t.Errorf("still to do: %+v", todo)
+	}
+
+	type results struct {
+		Results []struct {
+			ID    int64
+			Score float32
+		}
+	}
+	var res results
+	e.json("POST", "/api/v1/ai/search", alice, map[string]any{"model": model, "vec": vec(1, 0, 0)}, 200, &res)
+	if len(res.Results) != 2 || res.Results[0].ID != a1.ID || res.Results[1].ID != a2.ID {
+		t.Errorf("alice's search: %+v", res) // a3 is too far from the best; bob's photo is bob's
+	}
+	e.json("POST", "/api/v1/ai/search", bob, map[string]any{"model": model, "vec": vec(1, 0, 0)}, 200, &res)
+	if len(res.Results) != 1 || res.Results[0].ID != b1.ID {
+		t.Errorf("bob's search: %+v", res)
+	}
+	// Trashed photos are not found.
+	e.json("POST", "/api/v1/assets/trash", alice, map[string][]int64{"ids": {a1.ID}}, 204, nil)
+	e.json("POST", "/api/v1/ai/search", alice, map[string]any{"model": model, "vec": vec(1, 0, 0)}, 200, &res)
+	if len(res.Results) == 0 || res.Results[0].ID != a2.ID {
+		t.Errorf("after trash: %+v", res)
+	}
+	// A vector of another length (another model) matches nothing.
+	e.json("POST", "/api/v1/ai/search", alice, map[string]any{"model": model, "vec": vec(1, 0)}, 200, &res)
+	if len(res.Results) != 0 {
+		t.Errorf("wrong length: %+v", res)
+	}
+
+	// The text model for clients: none yet, then uploaded file by file.
+	e.json("GET", "/api/v1/ai/model", bob, nil, 404, nil)
+	var info struct{ Features map[string]bool }
+	e.json("GET", "/api/v1/server", "", nil, 200, &info)
+	if info.Features["content_search"] {
+		t.Error("content search offered without a model")
+	}
+	files := map[string]string{"text.onnx": "onnx bytes", "vocab.txt": "[PAD]\n", "dense.safetensors": "weights", "model.json": `{"dim":3}`}
+	for name, body := range files {
+		res := e.do("PUT", "/api/v1/ai/model/"+model+"/"+name, bob, strings.NewReader(body), nil)
+		if res.StatusCode != 403 {
+			t.Errorf("bob uploads a model file: %d", res.StatusCode)
+		}
+		if res := e.do("PUT", "/api/v1/ai/model/"+model+"/"+name, alice, strings.NewReader(body), nil); res.StatusCode != 204 {
+			t.Fatalf("upload %s: %d", name, res.StatusCode)
+		}
+	}
+	if res := e.do("PUT", "/api/v1/ai/model/"+model+"/../../trunk.db", alice, strings.NewReader("x"), nil); res.StatusCode == 204 {
+		t.Error("wrote outside the model folder")
+	}
+	var m struct {
+		Model string
+		Files []struct {
+			Name   string
+			Size   int64
+			SHA256 string
+		}
+		Indexed int
+	}
+	e.json("GET", "/api/v1/ai/model", bob, nil, 200, &m)
+	if m.Model != model || len(m.Files) != 4 || m.Indexed != 4 {
+		t.Fatalf("model: %+v", m)
+	}
+	r := e.do("GET", "/api/v1/ai/model/"+model+"/vocab.txt", bob, nil, nil)
+	b, _ := io.ReadAll(r.Body)
+	if r.StatusCode != 200 || string(b) != "[PAD]\n" {
+		t.Errorf("download: %d %q", r.StatusCode, b)
+	}
+	e.json("GET", "/api/v1/server", "", nil, 200, &info)
+	if !info.Features["content_search"] {
+		t.Error("content search not offered")
+	}
+}

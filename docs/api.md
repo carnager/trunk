@@ -159,6 +159,25 @@ location key blanked, in place, so size, pixels, date and camera stay as they ar
 keep working. Formats trunk cannot clean (HEIC, for one) are replaced by their preview JPEG when they
 have a location. Trashed photos leave the link; revoked and expired links show nothing.
 
+## Content search
+
+| Call | |
+|---|---|
+| `GET /ai/model` | → `{"model", "files": [{"name", "size", "sha256"}], "indexed": n}`: the text model clients download to make search vectors; `404` while there is none |
+| `GET /ai/model/{model}/{file}` | one of its files: `text.onnx`, `vocab.txt`, `dense.safetensors`, `model.json` |
+| `POST /ai/search` | `{"model", "vec": base64, "limit"}` → `{"results": [{"id", "score"}]}`: one's own photos, best first |
+| `GET /ai/todo?model=M&limit=N` | admin: `{"assets": [{"id", "sha256"}], "remaining": n}`, the household's files without a vector yet |
+| `GET /ai/thumb/{id}` | admin: any asset's medium thumbnail, for the indexer |
+| `PUT /ai/embeddings` | admin: `{"model", "items": [{"sha256", "vec": base64}]}` |
+| `PUT /ai/model/{model}/{file}` | admin: a file of the text model; once all four are there it is the current one |
+
+trunk runs no model: the machines it runs on are often too small. An indexer elsewhere (`trunk-ai`,
+see `ai/`) fetches thumbnails, computes a vector per file content with an image model and sends it;
+clients turn search text into a vector with the matching text model, which the indexer uploads to
+trunk for them, and send that. Vectors are unit-length little-endian float32s (base64); trunk
+compares them (dot product) and returns the best match and everything within 0.035 of it, at least
+0.255 (tuned on CLIP ViT-B/32, multilingual). `features.content_search` says a model is there.
+
 ## Correcting date and place
 
 | Call | |

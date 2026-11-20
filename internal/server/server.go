@@ -30,6 +30,7 @@ type Config struct {
 
 // Server owns the data directory and serves the API.
 type Server struct {
+	vecs      vecCache // content search vectors, by model
 	cfg       Config
 	db        *sql.DB
 	log       *slog.Logger
@@ -135,6 +136,13 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/v1/similar", s.auth(s.handleSimilar))
 	m.HandleFunc("POST /api/v1/assets/adjust", s.auth(s.handleAdjust))
 	m.HandleFunc("GET /api/v1/places", s.auth(s.handlePlaces))
+	m.HandleFunc("GET /api/v1/ai/todo", s.auth(s.handleAITodo))
+	m.HandleFunc("GET /api/v1/ai/thumb/{id}", s.auth(s.handleAIThumb))
+	m.HandleFunc("PUT /api/v1/ai/embeddings", s.auth(s.handleAIEmbeddings))
+	m.HandleFunc("POST /api/v1/ai/search", s.auth(s.handleAISearch))
+	m.HandleFunc("GET /api/v1/ai/model", s.auth(s.handleAIModel))
+	m.HandleFunc("PUT /api/v1/ai/model/{model}/{file}", s.auth(s.handleAIModelPut))
+	m.HandleFunc("GET /api/v1/ai/model/{model}/{file}", s.auth(s.handleAIModelFile))
 	m.HandleFunc("POST /api/v1/similar/ignore", s.auth(s.handleSimilarIgnore))
 	m.HandleFunc("POST /api/v1/assets/restore", s.auth(s.handleRestore))
 	m.HandleFunc("POST /api/v1/assets/delete", s.auth(s.handleDelete))
@@ -181,17 +189,18 @@ func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
 		"trash_days": s.cfg.TrashDays,
 		"max_upload": s.cfg.MaxUpload,
 		"features": map[string]bool{
-			"video_posters": media.HaveFFmpeg(),
-			"tus":           true,
-			"edits":         true,
-			"similar":       true,
-			"motion":        true,
-			"adjust":        true,
-			"source_sha256": true,
-			"albums":        true,
-			"shared_albums": true,
-			"direct_shares": true,
-			"links":         true,
+			"video_posters":  media.HaveFFmpeg(),
+			"tus":            true,
+			"edits":          true,
+			"similar":        true,
+			"motion":         true,
+			"adjust":         true,
+			"content_search": s.currentModel() != "",
+			"source_sha256":  true,
+			"albums":         true,
+			"shared_albums":  true,
+			"direct_shares":  true,
+			"links":          true,
 		},
 		"thumb_sizes": media.Sizes,
 	})
