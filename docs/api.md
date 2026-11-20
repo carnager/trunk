@@ -107,6 +107,27 @@ leave an album or the album is deleted. Albums always come with their complete l
 
 Trashed assets stay in their albums (clients hide them); deleting an asset for good removes it.
 
+### Sharing within the household
+
+Albums can be shared with the other accounts on the server. Members see the album in their
+feed with `"role": "member"` and `"owner": {"id", "name"}`; the owner sees `"members": [{"id",
+"name", "can_add"}]`. Members may add their own photos (unless `can_add` is false) and take out
+what they added; only the owner renames, deletes, shares and takes out anything.
+
+Photos of others are not in a member's own feed and library. Fetch them per album:
+
+| | |
+|---|---|
+| `GET /users` | the other accounts: `{"users": [{"id", "name"}]}` |
+| `PUT /albums/{id}/members/{user}` | `{"can_add": true}` shares the album or changes the right → album (owner) |
+| `DELETE /albums/{id}/members/{user}` | stops sharing; a member may remove themselves to leave → `204` |
+| `GET /albums/{id}/assets` | the album's assets in full, in album order; others' carry `"owner": "name"` |
+
+Any change to a photo in a shared album (edit, caption, favourite, trash) gives the album a new
+`seq`, so clients fetch its assets again when a shared album shows up in `/changes`. Shared
+photos can be read (`/assets/{id}`, `/file`, `/original`, `/thumb`) but only changed by their
+owner. A member who leaves or is removed gets the album as a tombstone.
+
 ## Delta sync
 
 ```

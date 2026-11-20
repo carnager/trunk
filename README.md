@@ -63,14 +63,14 @@ The API is described in [docs/api.md](docs/api.md).
 Done: accounts and per-device tokens, simple and resumable (tus) upload with SHA-256
 deduplication, metadata (EXIF, QuickTime, file names), thumbnails and video posters, delta sync,
 favourites, trash with expiry, edits that keep the first upload, albums, Google Takeout import,
-place names and captions.
+place names and captions, albums shared within the household.
 
 Places: photos with GPS get the nearest town, region and country, offline, from
 [GeoNames](https://www.geonames.org) data (CC BY 4.0) built into the binary
 (`go run ./tools/placesgen` rebuilds it).
 
-Next: albums shared within the household, then a small web UI and share links, then search and
-faces.
+Next: share links with a small web page for people without an account, then search by content
+and faces.
 
 ## Brand
 

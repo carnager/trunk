@@ -5,46 +5,87 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/carnager/trunk/internal/db"
 )
 
-// Album is an ordered list of the user's assets. Like assets it carries a seq
-// and travels in the changes feed, always with its complete list, so clients
-// simply replace their copy. A deleted album is a tombstone (ID, Seq, Deleted).
+// Album is an ordered list of assets. Like assets it carries a seq and
+// travels in the changes feed, always with its complete list, so clients
+// simply replace their copy. A deleted album, or one the caller no longer
+// shares, is a tombstone (ID, Seq, Deleted).
+//
+// Albums can be shared within the household: members see them and, if
+// allowed, add their own photos. Members' feeds carry the album but not its
+// assets, which are not theirs; GET /albums/{id}/assets returns them, and
+// any change to an asset in a shared album gives the album a new seq.
 type Album struct {
 	ID        int64      `json:"id"`
 	Seq       int64      `json:"seq"`
 	Deleted   bool       `json:"deleted,omitempty"`
 	Name      string     `json:"name,omitempty"`
 	AssetIDs  []int64    `json:"asset_ids"`
+	Owner     *UserRef   `json:"owner,omitempty"`
+	Members   []Member   `json:"members,omitempty"`
+	Role      string     `json:"role,omitempty"`    // owner | member
+	CanAdd    bool       `json:"can_add,omitempty"` // whether the caller may add photos
 	CreatedAt *time.Time `json:"created_at,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
 
 	userID int64
 }
 
-const albumCols = `id, user_id, seq, name, created_at, updated_at, deleted_at`
+// UserRef names an account.
+type UserRef struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
 
-func (s *Server) scanAlbum(ctx context.Context, sc scanner) (*Album, error) {
+// Member is someone an album is shared with.
+type Member struct {
+	UserRef
+	CanAdd bool `json:"can_add"`
+}
+
+// albumSel selects albums as one user (the first two arguments) sees them:
+// their own and those shared with them. The seq is the later of the album's
+// and the membership's, so joining or leaving reaches the member's feed; a
+// membership that ended keeps the seq of its end, and the album is gone.
+const albumSel = `SELECT al.id, al.user_id, ow.name,
+	CASE WHEN m.removed_at IS NOT NULL THEN m.seq ELSE MAX(al.seq, COALESCE(m.seq, 0)) END AS eseq,
+	al.name, al.created_at, al.updated_at,
+	(al.deleted_at IS NOT NULL OR m.removed_at IS NOT NULL) AS gone,
+	COALESCE(m.can_add, 1)
+	FROM albums al JOIN users ow ON ow.id = al.user_id
+	LEFT JOIN album_members m ON m.album_id = al.id AND m.user_id = ?
+	WHERE (al.user_id = ? OR m.user_id IS NOT NULL)`
+
+func (s *Server) scanAlbum(sc scanner, viewer int64) (*Album, error) {
 	var a Album
+	var ownerName string
 	var created, updated int64
-	var deleted sql.NullInt64
-	if err := sc.Scan(&a.ID, &a.userID, &a.Seq, &a.Name, &created, &updated, &deleted); err != nil {
+	var gone, canAdd bool
+	if err := sc.Scan(&a.ID, &a.userID, &ownerName, &a.Seq, &a.Name, &created, &updated, &gone, &canAdd); err != nil {
 		return nil, err
 	}
-	if deleted.Valid {
-		return &Album{ID: a.ID, Seq: a.Seq, Deleted: true, AssetIDs: nil, userID: a.userID}, nil
+	if gone {
+		return &Album{ID: a.ID, Seq: a.Seq, Deleted: true, userID: a.userID}, nil
+	}
+	if a.userID == viewer {
+		a.Role, a.CanAdd = "owner", true
+	} else {
+		a.Role, a.CanAdd = "member", canAdd
+		a.Owner = &UserRef{a.userID, ownerName}
 	}
 	c, u := time.UnixMilli(created).UTC(), time.UnixMilli(updated).UTC()
 	a.CreatedAt, a.UpdatedAt = &c, &u
 	return &a, nil
 }
 
-// fillAlbumAssets loads the asset lists of live albums in one query.
-func (s *Server) fillAlbumAssets(ctx context.Context, albums []*Album) error {
+// fillAlbums loads the asset lists and members of live albums.
+func (s *Server) fillAlbums(ctx context.Context, albums []*Album) error {
 	byID := map[int64]*Album{}
 	var ids []any
 	for _, a := range albums {
@@ -62,13 +103,29 @@ func (s *Server) fillAlbumAssets(ctx context.Context, albums []*Album) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var al, as int64
 		if err := rows.Scan(&al, &as); err != nil {
+			rows.Close()
 			return err
 		}
 		byID[al].AssetIDs = append(byID[al].AssetIDs, as)
+	}
+	rows.Close()
+	rows, err = s.db.QueryContext(ctx, `SELECT m.album_id, u.id, u.name, m.can_add FROM album_members m
+		JOIN users u ON u.id = m.user_id
+		WHERE m.album_id IN (`+placeholders(len(ids))+`) AND m.removed_at IS NULL ORDER BY u.name`, ids...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var al int64
+		var m Member
+		if err := rows.Scan(&al, &m.ID, &m.Name, &m.CanAdd); err != nil {
+			return err
+		}
+		byID[al].Members = append(byID[al].Members, m)
 	}
 	return rows.Err()
 }
@@ -77,16 +134,16 @@ func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
+// getAlbum loads an album the user owns or shares.
 func (s *Server) getAlbum(ctx context.Context, userID, id int64) (*Album, error) {
-	a, err := s.scanAlbum(ctx, s.db.QueryRowContext(ctx,
-		`SELECT `+albumCols+` FROM albums WHERE id = ? AND user_id = ?`, id, userID))
+	a, err := s.scanAlbum(s.db.QueryRowContext(ctx, albumSel+` AND al.id = ?`, userID, userID, id), userID)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && a.Deleted) {
 		return nil, errNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return a, s.fillAlbumAssets(ctx, []*Album{a})
+	return a, s.fillAlbums(ctx, []*Album{a})
 }
 
 func (s *Server) albumFromPath(w http.ResponseWriter, r *http.Request) (*Album, bool) {
@@ -105,19 +162,29 @@ func (s *Server) albumFromPath(w http.ResponseWriter, r *http.Request) (*Album, 
 	return a, true
 }
 
+// ownAlbumFromPath is albumFromPath for changes only the owner may make.
+func (s *Server) ownAlbumFromPath(w http.ResponseWriter, r *http.Request) (*Album, bool) {
+	a, ok := s.albumFromPath(w, r)
+	if ok && a.Role != "owner" {
+		httpError(w, http.StatusForbidden, "only the album's owner can do that")
+		return nil, false
+	}
+	return a, ok
+}
+
 // albumChanges returns albums changed after since, oldest change first.
 func (s *Server) albumChanges(ctx context.Context, userID, since int64, limit int) ([]*Album, error) {
-	q := `SELECT ` + albumCols + ` FROM albums WHERE user_id = ? AND seq > ?`
+	q := albumSel + ` AND eseq > ?`
 	if since == 0 {
-		q += ` AND deleted_at IS NULL`
+		q += ` AND NOT gone`
 	}
-	rows, err := s.db.QueryContext(ctx, q+` ORDER BY seq LIMIT ?`, userID, since, limit)
+	rows, err := s.db.QueryContext(ctx, q+` ORDER BY eseq LIMIT ?`, userID, userID, since, limit)
 	if err != nil {
 		return nil, err
 	}
 	var list []*Album
 	for rows.Next() {
-		a, err := s.scanAlbum(ctx, rows)
+		a, err := s.scanAlbum(rows, userID)
 		if err != nil {
 			rows.Close()
 			return nil, err
@@ -128,7 +195,7 @@ func (s *Server) albumChanges(ctx context.Context, userID, since int64, limit in
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return list, s.fillAlbumAssets(ctx, list)
+	return list, s.fillAlbums(ctx, list)
 }
 
 // inTx runs fn in a transaction with a fresh seq for the change.
@@ -200,8 +267,8 @@ func (s *Server) AddToAlbum(ctx context.Context, userID, albumID int64, ids []in
 			if atEnd {
 				pos = hi.Int64 + 1 + int64(i)
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO album_assets (album_id, asset_id, pos, added_at)
-				VALUES (?, ?, ?, ?)`, albumID, id, pos, now); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO album_assets (album_id, asset_id, pos, added_at, added_by)
+				VALUES (?, ?, ?, ?, ?)`, albumID, id, pos, now, userID); err != nil {
 				return err
 			}
 		}
@@ -212,6 +279,44 @@ func (s *Server) AddToAlbum(ctx context.Context, userID, albumID int64, ids []in
 func touchAlbum(ctx context.Context, tx *sql.Tx, albumID, seq, now int64) error {
 	_, err := tx.ExecContext(ctx, `UPDATE albums SET seq = ?, updated_at = ? WHERE id = ?`, seq, now, albumID)
 	return err
+}
+
+// touchSharedAlbums gives every shared album that holds one of the assets a
+// new seq: its members do not get those assets in their feed, so this is how
+// they learn to fetch the album's assets again after an edit, a new caption
+// or a trip to the trash.
+func touchSharedAlbums(ctx context.Context, tx *sql.Tx, assetIDs []int64, now int64) error {
+	if len(assetIDs) == 0 {
+		return nil
+	}
+	args := make([]any, len(assetIDs))
+	for i, id := range assetIDs {
+		args[i] = id
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT aa.album_id FROM album_assets aa
+		WHERE aa.asset_id IN (`+placeholders(len(args))+`)
+		AND EXISTS (SELECT 1 FROM album_members m WHERE m.album_id = aa.album_id AND m.removed_at IS NULL)`, args...)
+	if err != nil {
+		return err
+	}
+	var albums []int64
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			albums = append(albums, id)
+		}
+	}
+	rows.Close()
+	for _, id := range albums {
+		seq, err := db.NextSeq(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if err := touchAlbum(ctx, tx, id, seq, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // unlistAsset drops a deleted asset from every album, so their lists in the
@@ -303,7 +408,7 @@ func (s *Server) handleGetAlbum(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePatchAlbum(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.albumFromPath(w, r)
+	a, ok := s.ownAlbumFromPath(w, r)
 	if !ok {
 		return
 	}
@@ -331,8 +436,9 @@ func (s *Server) handlePatchAlbum(w http.ResponseWriter, r *http.Request) {
 	s.respondAlbum(w, r, a)
 }
 
+// respondAlbum answers with the album as the caller sees it now.
 func (s *Server) respondAlbum(w http.ResponseWriter, r *http.Request, a *Album) {
-	fresh, err := s.getAlbum(r.Context(), a.userID, a.ID)
+	fresh, err := s.getAlbum(r.Context(), sessionFrom(r).UserID, a.ID)
 	if err != nil {
 		s.internal(w, err)
 		return
@@ -356,7 +462,12 @@ func (s *Server) handleAlbumAdd(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "need 1 to 5000 ids")
 		return
 	}
-	if err := s.AddToAlbum(r.Context(), a.userID, a.ID, req.IDs, req.End); err != nil {
+	if !a.CanAdd {
+		httpError(w, http.StatusForbidden, "you may look at this album but not add to it")
+		return
+	}
+	// Everyone adds their own photos, also to an album someone else owns.
+	if err := s.AddToAlbum(r.Context(), sessionFrom(r).UserID, a.ID, req.IDs, req.End); err != nil {
 		s.albumError(w, err)
 		return
 	}
@@ -372,10 +483,15 @@ func (s *Server) handleAlbumRemove(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The owner takes out anything; a member only what they added.
+	me := sessionFrom(r).UserID
 	err := s.inTx(r.Context(), func(tx *sql.Tx, seq, now int64) error {
 		for _, id := range ids {
-			if _, err := tx.ExecContext(r.Context(), `DELETE FROM album_assets WHERE album_id = ? AND asset_id = ?`,
-				a.ID, id); err != nil {
+			q, args := `DELETE FROM album_assets WHERE album_id = ? AND asset_id = ?`, []any{a.ID, id}
+			if a.Role != "owner" {
+				q, args = q+` AND added_by = ?`, append(args, me)
+			}
+			if _, err := tx.ExecContext(r.Context(), q, args...); err != nil {
 				return err
 			}
 		}
@@ -390,7 +506,7 @@ func (s *Server) handleAlbumRemove(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteAlbum removes the album; its photos stay in the library.
 func (s *Server) handleDeleteAlbum(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.albumFromPath(w, r)
+	a, ok := s.ownAlbumFromPath(w, r)
 	if !ok {
 		return
 	}
@@ -407,4 +523,162 @@ func (s *Server) handleDeleteAlbum(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleAlbumAssets returns an album's assets in full, also those of other
+// people in a shared album, which are not in the caller's feed.
+func (s *Server) handleAlbumAssets(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.albumFromPath(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	me := sessionFrom(r).UserID
+	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixed("a.", assetCols)+`, u.name FROM album_assets aa
+		JOIN assets a ON a.id = aa.asset_id AND a.deleted_at IS NULL
+		JOIN users u ON u.id = a.user_id
+		WHERE aa.album_id = ? ORDER BY aa.pos`, a.ID)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	defer rows.Close()
+	list := []*Asset{}
+	for rows.Next() {
+		var owner string
+		as, err := s.scanAsset(scanWith(rows, &owner))
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		if as.userID != me {
+			as.Owner = owner
+		}
+		localize(ctx, as)
+		list = append(list, as)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assets": list})
+}
+
+// scanWith appends extra destinations to the ones scanAsset passes.
+type extraScanner struct {
+	sc    scanner
+	extra []any
+}
+
+func (e extraScanner) Scan(dest ...any) error { return e.sc.Scan(append(dest, e.extra...)...) }
+
+func scanWith(sc scanner, extra ...any) scanner { return extraScanner{sc, extra} }
+
+func prefixed(p, cols string) string {
+	parts := strings.Split(cols, ",")
+	for i, c := range parts {
+		parts[i] = p + strings.TrimSpace(c)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// handleSetMember shares the album with a household member, or changes
+// whether they may add photos: PUT /albums/{id}/members/{user} {"can_add"}.
+func (s *Server) handleSetMember(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.ownAlbumFromPath(w, r)
+	if !ok {
+		return
+	}
+	userID, err := strconv.ParseInt(r.PathValue("user"), 10, 64)
+	if err != nil || userID == a.userID {
+		httpError(w, http.StatusBadRequest, "bad user")
+		return
+	}
+	var req struct {
+		CanAdd *bool `json:"can_add"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	canAdd := req.CanAdd == nil || *req.CanAdd
+	var exists int
+	if err := s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users WHERE id = ?`, userID).Scan(&exists); err != nil || exists == 0 {
+		httpError(w, http.StatusNotFound, "no such user")
+		return
+	}
+	err = s.inTx(r.Context(), func(tx *sql.Tx, seq, now int64) error {
+		if _, err := tx.ExecContext(r.Context(), `INSERT INTO album_members (album_id, user_id, can_add, seq) VALUES (?, ?, ?, ?)
+			ON CONFLICT (album_id, user_id) DO UPDATE SET can_add = excluded.can_add, seq = excluded.seq, removed_at = NULL`,
+			a.ID, userID, boolInt(canAdd), seq); err != nil {
+			return err
+		}
+		// The owner's other devices learn about the member through the album.
+		albumSeq, err := db.NextSeq(r.Context(), tx)
+		if err != nil {
+			return err
+		}
+		return touchAlbum(r.Context(), tx, a.ID, albumSeq, now)
+	})
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	s.respondAlbum(w, r, a)
+}
+
+// handleRemoveMember stops sharing with someone; members may remove
+// themselves, i.e. leave. Photos they added stay in the album.
+func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.albumFromPath(w, r)
+	if !ok {
+		return
+	}
+	me := sessionFrom(r).UserID
+	userID, err := strconv.ParseInt(r.PathValue("user"), 10, 64)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "bad user")
+		return
+	}
+	if a.Role != "owner" && userID != me {
+		httpError(w, http.StatusForbidden, "only the album's owner can do that")
+		return
+	}
+	err = s.inTx(r.Context(), func(tx *sql.Tx, seq, now int64) error {
+		res, err := tx.ExecContext(r.Context(), `UPDATE album_members SET removed_at = ?, seq = ?
+			WHERE album_id = ? AND user_id = ? AND removed_at IS NULL`, now, seq, a.ID, userID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return errNotFound
+		}
+		albumSeq, err := db.NextSeq(r.Context(), tx)
+		if err != nil {
+			return err
+		}
+		return touchAlbum(r.Context(), tx, a.ID, albumSeq, now)
+	})
+	if errors.Is(err, errNotFound) {
+		httpError(w, http.StatusNotFound, "not a member")
+		return
+	} else if err != nil {
+		s.internal(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleUsers lists the household: the other accounts on this server, to
+// share albums with.
+func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.QueryContext(r.Context(), `SELECT id, name FROM users WHERE id != ? ORDER BY name`, sessionFrom(r).UserID)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	defer rows.Close()
+	list := []UserRef{}
+	for rows.Next() {
+		var u UserRef
+		if rows.Scan(&u.ID, &u.Name) == nil {
+			list = append(list, u)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": list})
 }

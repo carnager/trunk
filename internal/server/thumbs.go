@@ -118,7 +118,7 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "size must be one of small, medium, preview")
 		return
 	}
-	a, ok := s.assetFromPath(w, r)
+	a, ok := s.readableAssetFromPath(w, r)
 	if !ok {
 		return
 	}

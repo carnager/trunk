@@ -956,3 +956,116 @@ func TestPlacesAndCaptions(t *testing.T) {
 		t.Errorf("backfilled place: %+v", after.Assets)
 	}
 }
+
+func TestSharedAlbums(t *testing.T) {
+	e := newEnv(t)
+	alice, bob := e.login("alice", "phone"), e.login("bob", "phone")
+	p1 := e.upload(alice, "familie.jpg", testJPEG(t, 32, 32, 61, false), 201)
+	p2 := e.upload(alice, "privat.jpg", testJPEG(t, 32, 32, 62, false), 201)
+	var al Album
+	e.json("POST", "/api/v1/albums", alice, map[string]any{"name": "Familie", "asset_ids": []int64{p1.ID}}, 201, &al)
+	path := fmt.Sprintf("/api/v1/albums/%d", al.ID)
+
+	var users struct{ Users []UserRef }
+	e.json("GET", "/api/v1/users", alice, nil, 200, &users)
+	if len(users.Users) != 1 || users.Users[0].Name != "bob" {
+		t.Fatalf("household: %+v", users)
+	}
+	bobID := users.Users[0].ID
+	member := fmt.Sprintf("%s/members/%d", path, bobID)
+
+	// Not shared yet: Bob sees nothing.
+	e.json("GET", path, bob, nil, 404, nil)
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", p1.ID), bob, nil, 404, nil)
+	var bf feed
+	e.json("GET", "/api/v1/changes", bob, nil, 200, &bf)
+	cur := bf.Cursor
+
+	e.json("PUT", member, alice, map[string]any{"can_add": true}, 200, &al)
+	if len(al.Members) != 1 || al.Members[0].Name != "bob" || al.Role != "owner" {
+		t.Errorf("owner's view: %+v", al)
+	}
+	e.json("GET", fmt.Sprintf("/api/v1/changes?since=%d", cur), bob, nil, 200, &bf)
+	if len(bf.Albums) != 1 || bf.Albums[0].Role != "member" || bf.Albums[0].Owner == nil || bf.Albums[0].Owner.Name != "alice" ||
+		fmt.Sprint(bf.Albums[0].AssetIDs) != fmt.Sprint([]int64{p1.ID}) || len(bf.Assets) != 0 {
+		t.Fatalf("bob joined: %+v", bf)
+	}
+	cur = bf.Cursor
+
+	// Bob sees what is in the album, nothing else of Alice's.
+	var content struct{ Assets []Asset }
+	e.json("GET", path+"/assets", bob, nil, 200, &content)
+	if len(content.Assets) != 1 || content.Assets[0].ID != p1.ID || content.Assets[0].Owner != "alice" {
+		t.Errorf("album assets for bob: %+v", content)
+	}
+	for _, p := range []string{"", "/original", "/file", "/thumb/small"} {
+		if res := e.do("GET", fmt.Sprintf("/api/v1/assets/%d%s", p1.ID, p), bob, nil, nil); res.StatusCode != 200 {
+			t.Errorf("bob GET shared %q: %d", p, res.StatusCode)
+		}
+	}
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", p2.ID), bob, nil, 404, nil)
+	// Looking is all: Alice's photo stays Alice's.
+	e.json("PATCH", fmt.Sprintf("/api/v1/assets/%d", p1.ID), bob, map[string]bool{"favorite": true}, 404, nil)
+	e.json("POST", "/api/v1/assets/trash", bob, map[string][]int64{"ids": {p1.ID}}, 204, nil)
+	var still Asset
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", p1.ID), alice, nil, 200, &still)
+	if still.TrashedAt != nil {
+		t.Error("bob trashed alice's photo")
+	}
+
+	// Bob adds a photo of his own; Alice, the owner, sees it.
+	b1 := e.upload(bob, "bobs.jpg", testJPEG(t, 32, 32, 63, false), 201)
+	e.json("POST", path+"/add", bob, map[string]any{"ids": []int64{b1.ID}, "end": true}, 200, &al)
+	e.json("POST", path+"/add", bob, map[string]any{"ids": []int64{p2.ID}}, 400, nil) // not his
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", b1.ID), alice, nil, 200, nil)
+	e.json("GET", path+"/assets", alice, nil, 200, &content)
+	if len(content.Assets) != 2 || content.Assets[1].Owner != "bob" {
+		t.Errorf("album assets for alice: %+v", content)
+	}
+
+	// Only the owner renames and deletes; a member takes out only their own photos.
+	e.json("PATCH", path, bob, map[string]string{"name": "Meins"}, 403, nil)
+	e.json("DELETE", path, bob, nil, 403, nil)
+	e.json("POST", path+"/remove", bob, map[string]any{"ids": []int64{p1.ID, b1.ID}}, 200, &al)
+	if fmt.Sprint(al.AssetIDs) != fmt.Sprint([]int64{p1.ID}) {
+		t.Errorf("after bob removed: %v", al.AssetIDs)
+	}
+
+	// A change to a photo in the album reaches the member through the album.
+	e.json("GET", fmt.Sprintf("/api/v1/changes?since=%d", cur), bob, nil, 200, &bf)
+	cur = bf.Cursor
+	e.json("PATCH", fmt.Sprintf("/api/v1/assets/%d", p1.ID), alice, map[string]string{"caption": "Oma"}, 200, nil)
+	e.json("GET", fmt.Sprintf("/api/v1/changes?since=%d", cur), bob, nil, 200, &bf)
+	if len(bf.Albums) != 1 || bf.Albums[0].ID != al.ID {
+		t.Errorf("caption change did not touch the shared album: %+v", bf.Albums)
+	}
+	cur = bf.Cursor
+
+	// View only.
+	e.json("PUT", member, alice, map[string]any{"can_add": false}, 200, nil)
+	e.json("POST", path+"/add", bob, map[string]any{"ids": []int64{b1.ID}}, 403, nil)
+
+	// Removed: gone from Bob's feed and out of reach.
+	e.json("DELETE", member, alice, nil, 204, nil)
+	e.json("GET", fmt.Sprintf("/api/v1/changes?since=%d", cur), bob, nil, 200, &bf)
+	if len(bf.Albums) != 1 || !bf.Albums[0].Deleted {
+		t.Errorf("removed member's feed: %+v", bf.Albums)
+	}
+	cur = bf.Cursor
+	e.json("GET", path, bob, nil, 404, nil)
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", p1.ID), bob, nil, 404, nil)
+
+	// Leaving on one's own, and the owner deleting the album.
+	e.json("PUT", member, alice, map[string]any{}, 200, nil)
+	e.json("DELETE", member, bob, nil, 204, nil)
+	e.json("PUT", member, alice, map[string]any{}, 200, nil)
+	e.json("GET", fmt.Sprintf("/api/v1/changes?since=%d", cur), bob, nil, 200, &bf)
+	cur = bf.Cursor
+	e.json("DELETE", path, alice, nil, 204, nil)
+	e.json("GET", fmt.Sprintf("/api/v1/changes?since=%d", cur), bob, nil, 200, &bf)
+	if len(bf.Albums) != 1 || !bf.Albums[0].Deleted {
+		t.Errorf("deleted album in member's feed: %+v", bf.Albums)
+	}
+	// Bob's own photo is still his.
+	e.json("GET", fmt.Sprintf("/api/v1/assets/%d", b1.ID), bob, nil, 200, nil)
+}

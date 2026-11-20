@@ -53,6 +53,8 @@ type Asset struct {
 	// The nearest town to Lat/Lon, in the language the client asked for.
 	Place   *places.Names `json:"place,omitempty"`
 	Caption string        `json:"caption,omitempty"`
+	// Set only for someone else's photo, seen through a shared album.
+	Owner string `json:"owner,omitempty"`
 
 	// Set once the asset has been edited: the current file differs from the
 	// first upload, which /original still returns.
@@ -177,6 +179,52 @@ func localize(ctx context.Context, a *Asset) {
 	}
 }
 
+// visibleAsset loads an asset the user owns or sees through a shared album.
+func (s *Server) visibleAsset(ctx context.Context, userID, id int64) (*Asset, error) {
+	var owner string
+	a, err := s.scanAsset(scanWith(s.db.QueryRowContext(ctx, `SELECT `+prefixed("a.", assetCols)+`, u.name
+		FROM assets a JOIN users u ON u.id = a.user_id WHERE a.id = ?`, id), &owner))
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && a.Deleted) {
+		return nil, errNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	if a.userID != userID {
+		var n int
+		// In an album the user owns, or one shared with them.
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM album_assets aa
+			JOIN albums al ON al.id = aa.album_id AND al.deleted_at IS NULL
+			LEFT JOIN album_members m ON m.album_id = al.id AND m.user_id = ? AND m.removed_at IS NULL
+			WHERE aa.asset_id = ? AND (al.user_id = ? OR m.user_id IS NOT NULL)`, userID, id, userID).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			return nil, errNotFound
+		}
+		a.Owner = owner
+	}
+	localize(ctx, a)
+	return a, nil
+}
+
+// readableAssetFromPath is assetFromPath for looking: shared photos count.
+func (s *Server) readableAssetFromPath(w http.ResponseWriter, r *http.Request) (*Asset, bool) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return nil, false
+	}
+	a, err := s.visibleAsset(r.Context(), sessionFrom(r).UserID, id)
+	if errors.Is(err, errNotFound) {
+		httpError(w, http.StatusNotFound, "no such asset")
+		return nil, false
+	} else if err != nil {
+		s.internal(w, err)
+		return nil, false
+	}
+	return a, true
+}
+
+// assetFromPath loads an asset of the caller's own, for changing it.
 func (s *Server) assetFromPath(w http.ResponseWriter, r *http.Request) (*Asset, bool) {
 	id, ok := pathID(w, r)
 	if !ok {
@@ -298,7 +346,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetAsset(w http.ResponseWriter, r *http.Request) {
-	if a, ok := s.assetFromPath(w, r); ok {
+	if a, ok := s.readableAssetFromPath(w, r); ok {
 		writeJSON(w, http.StatusOK, a)
 	}
 }
@@ -369,6 +417,9 @@ func (s *Server) mutate(ctx context.Context, userID int64, ids []int64, set stri
 			WHERE id = ? AND user_id = ? AND deleted_at IS NULL`, a...); err != nil {
 			return err
 		}
+	}
+	if err := touchSharedAlbums(ctx, tx, ids, now); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -484,7 +535,7 @@ func (s *Server) tombstone(ctx context.Context, id int64) error {
 
 // handleFile serves the asset's current file: the edit if there is one.
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.assetFromPath(w, r)
+	a, ok := s.readableAssetFromPath(w, r)
 	if !ok {
 		return
 	}
@@ -497,7 +548,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 
 // handleOriginal serves the file as first uploaded, even after edits.
 func (s *Server) handleOriginal(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.assetFromPath(w, r)
+	a, ok := s.readableAssetFromPath(w, r)
 	if !ok {
 		return
 	}

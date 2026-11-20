@@ -166,6 +166,9 @@ func (s *Server) applyEdit(ctx context.Context, a *Asset, rel, sha string, size 
 		VALUES (?, ?, ?, 'edit')`, a.userID, sha, a.ID); err != nil {
 		return err
 	}
+	if err := touchSharedAlbums(ctx, tx, []int64{a.ID}, now); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -202,8 +205,10 @@ func (s *Server) revertEdit(ctx context.Context, a *Asset) (*Asset, error) {
 			WHERE id = ? AND edited_at IS NOT NULL`, seq, now, a.ID); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `DELETE FROM asset_hashes WHERE asset_id = ? AND kind = 'edit'`, a.ID)
-		return err
+		if _, err := tx.ExecContext(ctx, `DELETE FROM asset_hashes WHERE asset_id = ? AND kind = 'edit'`, a.ID); err != nil {
+			return err
+		}
+		return touchSharedAlbums(ctx, tx, []int64{a.ID}, now)
 	})
 	if err != nil {
 		return nil, err

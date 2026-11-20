@@ -168,6 +168,23 @@ ALTER TABLE assets ADD COLUMN place_id INTEGER;
 ALTER TABLE assets ADD COLUMN caption TEXT;
 CREATE INDEX assets_place ON assets(place_id) WHERE place_id > 0;
 `,
+	// 5: albums shared within the household
+	`
+-- seq marks the last change of the membership, so joining and leaving reach
+-- the member's feed; removed_at keeps a left membership as a tombstone.
+CREATE TABLE album_members (
+	album_id   INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+	user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	can_add    INTEGER NOT NULL DEFAULT 1,
+	seq        INTEGER NOT NULL,
+	removed_at INTEGER,
+	PRIMARY KEY (album_id, user_id)
+);
+CREATE INDEX album_members_user ON album_members(user_id);
+-- Who put a photo into an album: members may take out only what they added.
+ALTER TABLE album_assets ADD COLUMN added_by INTEGER;
+UPDATE album_assets SET added_by = (SELECT user_id FROM albums WHERE albums.id = album_assets.album_id);
+`,
 }
 
 func migrate(d *sql.DB) error {
