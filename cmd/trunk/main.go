@@ -244,7 +244,8 @@ func readPassword() (string, error) {
 	if !term.IsTerminal(fd) {
 		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 		if err != nil && line == "" {
-			return "", errors.New("no password on stdin")
+			return "", errors.New("no terminal to ask for a password: run this in a terminal, " +
+				"pipe the password in, or set TRUNK_PASSWORD")
 		}
 		return strings.TrimRight(line, "\r\n"), nil
 	}
